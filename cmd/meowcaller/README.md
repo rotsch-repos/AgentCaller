@@ -37,9 +37,19 @@ meowcaller talk -dry-run [flags] <input.wav>
 meowcaller talk -replay <input.wav> [--listen-only] [flags]
 ```
 
+(-replay is a flag, not a positional argument; the same holds for all of the following lines —
+flags may be placed after a positional argument as well.)
+
+Flags: -store (default ~/.config/meowcaller/talk-voip.db, separate from the notify store),
+-answer-timeout (45 s), -max-listen (60 s, per VAD round), -prompt, -say <datei>, -say-text,
+-dry-run, -replay <datei>, --listen-only, -tts-file <datei>, -out-dir <verzeichnis>
+(artifacts: transcript.json, answer.txt, answer.wav/mp3, per-round recordings),
+-save-audio <verzeichnis> (superseded by -out-dir), -stt-model, -llm-endpoint, -llm-model,
+-tts-backend (piper|edge), -piper-voice, -vad-silence, -vad-min-speech.
+
 Pipeline: announcement → energy-based VAD endpointing (fixed interim line the moment speech
 closes) → local whisper STT → local LLM answer → local piper TTS → hangup. `-dry-run` runs the
 STT+LLM+TTS chain on a WAV without a call; `-replay` feeds a recorded 16 kHz call-frame WAV
-through the VAD (frame-paced, deterministic) and can stop after the endpointing report with
+through the VAD (frame count rather than wall clock — deterministic, no real-time pacing) and can stop after the endpointing report with
 `--listen-only`. Artifacts (transcript.json, answer.txt, answer.wav/mp3, per-round recordings)
 land in an output directory for inspection.

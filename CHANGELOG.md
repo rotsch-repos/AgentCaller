@@ -28,6 +28,25 @@ All notable changes to meowcaller, tracked per module. Format loosely follows
   All intermediate artifacts (transcript.json, answer.txt, answer.wav/mp3,
   per-round recordings) land in an output directory for inspection.
 
+### cmd/meowcaller — `talk` review fixes (review round) — `implemented`
+- Hardened every wait path with the 20 s playback guard (announcement, interim,
+  answer) so a stuck audio source can never hang the call.
+- Serialized (OnFinish, Play) behind a mutex so the interim line and the answer
+  can no longer race over the player's single finish callback.
+- `-max-listen 0` now truly disables the per-round cap (the VAD's own 60 s
+  maximum still applies).
+- The in-flight call context is cancelled on hangup, killing an orphaned
+  whisper child process; the whisper fallback chain runs under one overall
+  budget (3 × per-model timeout) and propagates the first concrete error.
+- The talk store default now uses `os.UserConfigDir` like notify (separate
+  `talk-voip.db` file), and `talk` reuses `registerNotificationCallbacks`
+  instead of a private copy.
+- `reorderFlagsFirst` classifies a leading dash as a flag only when the name is
+  registered, so a malformed line fails with exit 2 instead of misparsing
+  silently.
+- The committed audio fixture is synthetic (machine speech through Opus after two
+  seconds of noise); no recording of a person is part of the repository.
+
 ### cmd/meowcaller — headless send-only notification calls — `implemented`
 - Added the installable pure-Go `meowcaller pair` and `meowcaller notify` commands for explicit terminal-only linked-device QR setup and one-shot WAV/MP3/Ogg-Opus or raw 8 kHz G.711 PCMU calls, with a user-private cross-platform SQLite store, 45-second answer and 5-minute playback limits (`0` explicitly disables either), EOF hangup, warning-only default logs, no diagnostics, and no mic/speaker/video dependency; calls without a receive sink now discard inbound audio/video before decrypt/decode, while PCMU KATs pin 480-byte/60 ms input to 960-sample/16 kHz call framing. Root and command tests pass; live WhatsApp relay proof remains pending a QR-linked account and approved recipient.
 

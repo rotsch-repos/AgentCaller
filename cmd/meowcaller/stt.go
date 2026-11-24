@@ -95,11 +95,19 @@ type whisperResult struct {
 }
 
 func (b *whisperCLIBackend) Transcribe(ctx context.Context, wavPath string) (string, error) {
+	// The fallback chain shares one overall budget (3 × per-model timeout) so a
+	// full walk can never hold a call for more than that (review: ~180 s silence).
+	runCtx, cancel := context.WithTimeout(ctx, 3*b.cfg.Timeout)
+	defer cancel()
 	bin := b.cfg.Binary
 	if bin == "" {
 		bin = resolveWhisperBinary()
 	}
+	var firstErr error
 	for _, model := range append([]string{b.cfg.Model}, b.cfg.Fallbacks...) {
+		if runCtx.Err() != nil {
+			break
+		}
 		device := "cuda"
 		env := os.Environ()
 		gpuID, ok := pickGPU(b.cfg.GPU, b.cfg.MinFreeMiB, b.log)
@@ -112,14 +120,17 @@ func (b *whisperCLIBackend) Transcribe(ctx context.Context, wavPath string) (str
 			device = "cpu"
 			env = append(env, "CUDA_VISIBLE_DEVICES=")
 		}
-		out, err := b.runWhisper(ctx, bin, wavPath, model, device, env)
+		out, err := b.runWhisper(runCtx, bin, wavPath, model, device, env)
 		if err == nil {
 			return out, nil
+		}
+		if firstErr == nil {
+			firstErr = err
 		}
 		b.log.Warn().Err(err).Str("model", model).Str("device", device).
 			Msg("stt run failed; trying fallback model")
 	}
-	return "", fmt.Errorf("whisper failed for model %s and all fallbacks", b.cfg.Model)
+	return "", fmt.Errorf("whisper failed for model %s and all fallbacks (%w)", b.cfg.Model, firstErr)
 }
 
 func (b *whisperCLIBackend) runWhisper(ctx context.Context, bin, wavPath, model, device string, env []string) (string, error) {

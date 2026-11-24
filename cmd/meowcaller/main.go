@@ -82,5 +82,5 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  meowcaller notify [flags] <target> <audio.mp3|wav|ogg|opus|mulaw|ulaw|->")
 	fmt.Fprintln(w, "  meowcaller talk [flags] <target>           (live VAD→STT→LLM→TTS call)")
 	fmt.Fprintln(w, "  meowcaller talk -dry-run [flags] <input.wav>")
-	fmt.Fprintln(w, "  meowcaller talk -replay <input.wav> [--listen-only] [flags]")
+	fmt.Fprintln(w, "  meowcaller talk -replay [flags] -replay <input.wav> [--listen-only] (VAD-Replay)")
 }

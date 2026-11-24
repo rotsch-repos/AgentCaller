@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	meowcaller "github.com/purpshell/meowcaller"
@@ -65,9 +66,19 @@ type talkConfig struct {
 	vadMinSpeech time.Duration
 }
 
+// parseTalkArgs parses the talk CLI arguments. The store default shares notify's
+// user-config directory but keeps a separate file (talk-voip.db), so talk never
+// reuses the notify store (review point 4) and stays platform-correct on
+// non-POSIX hosts via os.UserConfigDir.
 func parseTalkArgs(args []string, stderr io.Writer) (talkConfig, error) {
 	var cfg talkConfig
-	flags := newTalkFlagSet(&cfg, stderr)
+	storeDefault := filepath.Join("~", ".config", "meowcaller", "talk-voip.db")
+	if base, err := defaultStorePath(); err == nil {
+		storeDefault = filepath.Join(filepath.Dir(base), "talk-voip.db")
+	} else if home, herr := os.UserHomeDir(); herr == nil {
+		storeDefault = filepath.Join(home, ".config", "meowcaller", "talk-voip.db")
+	}
+	flags := newTalkFlagSet(&cfg, stderr, storeDefault)
 	if err := flags.Parse(reorderFlagsFirst(flags, args)); err != nil {
 		return cfg, errors.Join(errUsage, err)
 	}
@@ -99,11 +110,10 @@ func parseTalkArgs(args []string, stderr io.Writer) (talkConfig, error) {
 // newTalkFlagSet registers all talk flags on a fresh FlagSet bound to cfg. It is
 // separated from parseTalkArgs so the ordering helper can consult the registered
 // flags in tests without running a parse.
-func newTalkFlagSet(cfg *talkConfig, stderr io.Writer) *flag.FlagSet {
-	home, _ := os.UserHomeDir()
+func newTalkFlagSet(cfg *talkConfig, stderr io.Writer, storeDefault string) *flag.FlagSet {
 	flags := flag.NewFlagSet("talk", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	flags.StringVar(&cfg.storePath, "store", filepath.Join(home, ".config", "meowcaller", "talk-voip.db"), "linked-device SQLite store for talk (separate from the notify store)")
+	flags.StringVar(&cfg.storePath, "store", storeDefault, "linked-device SQLite store for talk (separate from the notify store)")
 	flags.DurationVar(&cfg.answerTimeout, "answer-timeout", talkDefaultAnswerTimeout, "maximum wait for the recipient to answer; 0 disables")
 	flags.DurationVar(&cfg.maxListen, "max-listen", talkDefaultMaxListen, "maximum time to listen per round; 0 disables")
 	flags.StringVar(&cfg.prompt, "prompt", DefaultLLMPrompt, "system prompt for the answer LLM")
@@ -125,7 +135,7 @@ func newTalkFlagSet(cfg *talkConfig, stderr io.Writer) *flag.FlagSet {
 	flags.Usage = func() {
 		fmt.Fprintln(stderr, "usage: meowcaller talk [flags] <target>")
 		fmt.Fprintln(stderr, "       meowcaller talk -dry-run [flags] <input.wav>")
-		fmt.Fprintln(stderr, "       meowcaller talk -replay <input.wav> [--listen-only] [flags]")
+		fmt.Fprintln(stderr, "       meowcaller talk -replay <input.wav> [--listen-only] (VAD-Replay, -replay ist ein Flag)")
 		flags.PrintDefaults()
 	}
 	return flags
@@ -133,30 +143,35 @@ func newTalkFlagSet(cfg *talkConfig, stderr io.Writer) *flag.FlagSet {
 
 // reorderFlagsFirst moves flag arguments (and their values) ahead of positional
 // arguments so that Go's flag package, which stops at the first positional, still
-// accepts "talk -dry-run <file> -out-dir <dir>". It consults the registered flag
-// set, so value-taking flags are detected without a hardcoded list.
+// accepts "talk -dry-run <file> -out-dir <dir>". A leading dash only counts as a
+// flag when the name matches a registered flag; anything else stays positional,
+// so a malformed line (e.g. an unknown -flag before the target) fails loudly with
+// a usage error instead of silently swallowing the next token.
 func reorderFlagsFirst(flags *flag.FlagSet, args []string) []string {
 	var ordered, pos []string
 	i := 0
 	for i < len(args) {
 		a := args[i]
-		if len(a) > 1 && a[0] == '-' && a != "-" {
-			name := strings.TrimLeft(a, "-")
+		name := ""
+		if len(a) > 1 && a[0] == '-' {
+			name = strings.TrimLeft(a, "-")
 			if eq := strings.IndexByte(name, '='); eq >= 0 {
 				name = name[:eq]
 			}
-			f := flags.Lookup(name)
-			takesValue := f != nil && reflect.TypeOf(f.Value).String() != "*flag.boolValue"
-			if takesValue && !strings.Contains(a, "=") && i+1 < len(args) {
-				ordered = append(ordered, a, args[i+1])
-				i += 2
-				continue
-			}
-			ordered = append(ordered, a)
+		}
+		f := flags.Lookup(name)
+		if f == nil {
+			pos = append(pos, a)
 			i++
 			continue
 		}
-		pos = append(pos, a)
+		if reflect.TypeOf(f.Value).String() != "*flag.boolValue" &&
+			!strings.Contains(a, "=") && i+1 < len(args) {
+			ordered = append(ordered, a, args[i+1])
+			i += 2
+			continue
+		}
+		ordered = append(ordered, a)
 		i++
 	}
 	return append(ordered, pos...)
@@ -429,13 +444,20 @@ func runDryRun(ctx context.Context, cfg talkConfig, log zerolog.Logger) error {
 // the announcement, listening rounds, interim line, and answer never overlap on
 // the shared player.
 type liveCall struct {
-	ctx        context.Context
-	cfg        talkConfig
-	log        zerolog.Logger
-	call       *meowcaller.Call
-	player     *meowcaller.Player
-	outDir     string
+	ctx    context.Context
+	cancel context.CancelFunc
+	cfg    talkConfig
+	log    zerolog.Logger
+	call   *meowcaller.Call
+	player *meowcaller.Player
+	outDir string
+
+	// interimWav is the pre-synthesized interim message.
 	interimWav string
+	// playMu serializes (OnFinish, Play) pairs so two goroutines can never
+	// swap the player's finish callback underneath each other (review: interim
+	// vs answer race).
+	playMu sync.Mutex
 }
 
 // runLiveCall executes the interactive call state machine:
@@ -491,14 +513,20 @@ func runLiveCall(ctx context.Context, cfg talkConfig, log zerolog.Logger, stderr
 	if err != nil {
 		return fmt.Errorf("place call: %w", err)
 	}
-	nc := &liveCall{ctx: ctx, cfg: cfg, log: log, call: call, player: meowcaller.NewPlayer(), outDir: outDir, interimWav: interimWav}
+	// The call context is cancelled on hangup so child processes (whisper)
+	// started for the in-flight round are killed instead of outliving the call
+	// (review: orphan whisper on GPU).
+	callCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	nc := &liveCall{ctx: callCtx, cancel: cancel, cfg: cfg, log: log, call: call, player: meowcaller.NewPlayer(), outDir: outDir, interimWav: interimWav}
 	call.Subscribe(nc.player)
 	call.Receive(meowcaller.SinkFunc(func([]float32) {})) // discard ringing audio
 
 	ready := make(chan struct{}, 1)
 	ended := make(chan string, 1)
 	done := make(chan error, 1)
-	registerTalkCallbacks(call, func() {
+	// registerNotificationCallbacks (notify.go) is shared: same replay semantics.
+	registerNotificationCallbacks(call, func() {
 		select {
 		case ready <- struct{}{}:
 		default:
@@ -519,19 +547,6 @@ func runLiveCall(ctx context.Context, cfg talkConfig, log zerolog.Logger, stderr
 	// Drive the post-answer flow in one goroutine; report via done.
 	go func() { done <- nc.runConversation(announceSource, ended) }()
 	return nc.awaitCompletion(done, ended)
-}
-
-// registerTalkCallbacks mirrors registerNotificationCallbacks, replaying the
-// current phase when the call is already active or already ended.
-func registerTalkCallbacks(call *meowcaller.Call, onReady func(), onEnd func(string)) {
-	call.OnReady(onReady)
-	call.OnEnd(onEnd)
-	switch call.State() {
-	case meowcaller.CallPhaseActive:
-		onReady()
-	case meowcaller.CallPhaseEnded:
-		onEnd("ended before callback registration")
-	}
 }
 
 // awaitAnswer blocks until the recipient answers or the call ends/times out.
@@ -618,7 +633,12 @@ func (nc *liveCall) listenRound(round int, ended <-chan string) (res VADResult, 
 	vad.OnEnd(func(r VADResult) { endCh <- r })
 	nc.call.Receive(vad)
 
-	listenTimer, listenC := optionalTimer(nc.cfg.maxListen + 10*time.Second)
+	// 0 disables the per-round cap; the VAD's own MaxListen (default 60 s) still applies.
+	var listenTimer *time.Timer
+	var listenC <-chan time.Time
+	if nc.cfg.maxListen > 0 {
+		listenTimer, listenC = optionalTimer(nc.cfg.maxListen + 10*time.Second)
+	}
 	if listenTimer != nil {
 		defer listenTimer.Stop()
 	}
@@ -661,6 +681,13 @@ func (nc *liveCall) processAndAnswer(round int, ended <-chan string) {
 	interimDone := make(chan struct{})
 	go func() {
 		nc.waitIdle(3 * time.Second)
+		nc.playMu.Lock()
+		defer nc.playMu.Unlock()
+		if nc.player.State() != meowcaller.PlayerIdle {
+			// The answer (or a fallback line) already took the player; the interim is skipped.
+			close(interimDone)
+			return
+		}
 		src, err := meowcaller.WAVFile(nc.interimWav)
 		if err != nil {
 			close(interimDone)
@@ -685,39 +712,10 @@ func (nc *liveCall) processAndAnswer(round int, ended <-chan string) {
 }
 
 // process runs STT → LLM → TTS on the trimmed speech and writes the artifacts.
+// It reuses processAudio (shared with dry-run and replay) so there is one
+// pipeline, one set of artifact names, one error behavior.
 func (nc *liveCall) process(speechWav string) (transcript, answer, ttsPath string, err error) {
-	cfg := nc.cfg
-	log := nc.log
-	outDir := nc.outDir
-	stt := newSTTFromConfig(cfg, log)
-	llm := newLLMFromConfig(cfg)
-	tts := newTTSFromConfig(cfg, outDir)
-
-	start := time.Now()
-	transcript, err = stt.Transcribe(nc.ctx, speechWav)
-	log.Info().Str("duration", time.Since(start).String()).Err(err).Int("transcript_bytes", len(transcript)).Msg("live stt finished")
-	if err != nil {
-		return "", "", "", fmt.Errorf("speech-to-text: %w", err)
-	}
-	if transcript == "" {
-		return "", "", "", errors.New("empty transcript")
-	}
-	_ = os.WriteFile(filepath.Join(outDir, "transcript.json"), jsonLine(map[string]string{"text": transcript}), 0o600)
-
-	answer, err = generateReply(nc.ctx, llm, transcript)
-	if err != nil {
-		return transcript, "", "", fmt.Errorf("answer generation: %w", err)
-	}
-	_ = os.WriteFile(filepath.Join(outDir, "answer.txt"), []byte(answer+"\n"), 0o600)
-
-	ttsPath, err = synthesize(nc.ctx, tts, answer, "answer")
-	if err != nil {
-		return transcript, answer, "", fmt.Errorf("text-to-speech: %w", err)
-	}
-	if cfg.ttsFile != "" {
-		_ = copyFile(ttsPath, cfg.ttsFile)
-	}
-	return transcript, answer, ttsPath, nil
+	return processAudio(nc.ctx, nc.cfg, speechWav, nc.outDir, nc.log)
 }
 
 // playAnswerAfter waits for the interim line to finish, plays the answer, then
@@ -743,15 +741,18 @@ func (nc *liveCall) waitInterim(interimDone <-chan struct{}, ended <-chan string
 	}
 }
 
-// sayLine synthesizes a line and plays it to the call.
-func (nc *liveCall) sayLine(text string, ended <-chan string) {
+// sayLine synthesizes a line and plays it to the call. It reports whether audio
+// actually reached the player, so the caller can log the degraded case instead
+// of ending the call silently (review: silent call on TTS failure).
+func (nc *liveCall) sayLine(text string, ended <-chan string) bool {
 	tts := newTTSFromConfig(nc.cfg, nc.outDir)
 	wav, err := synthesize(nc.ctx, tts, text, fmt.Sprintf("line-%d", time.Now().UnixNano()))
 	if err != nil {
-		nc.log.Warn().Err(err).Msg("synthesize line failed")
-		return
+		nc.log.Error().Err(err).Msg("synthesize line failed; the call may end without this line")
+		return false
 	}
 	nc.playLine(wav, ended)
+	return true
 }
 
 // playLine plays a WAV to the call and waits for it to finish.
@@ -763,8 +764,10 @@ func (nc *liveCall) playLine(wav string, ended <-chan string) {
 		return
 	}
 	done := make(chan struct{})
+	nc.playMu.Lock()
 	nc.player.OnFinish(func() { close(done) })
 	nc.player.Play(src)
+	nc.playMu.Unlock()
 	select {
 	case <-done:
 	case <-ended:
@@ -783,7 +786,8 @@ func (nc *liveCall) waitIdle(timeout time.Duration) {
 	}
 }
 
-// waitForPlay blocks until a playback finishes or the peer hangs up.
+// waitForPlay blocks until a playback finishes, the peer hangs up, or the
+// playback guard elapses (a stuck source must never hold the call).
 func (nc *liveCall) waitForPlay(done <-chan struct{}, ended <-chan string) error {
 	select {
 	case <-done:
@@ -794,9 +798,13 @@ func (nc *liveCall) waitForPlay(done <-chan struct{}, ended <-chan string) error
 	case <-nc.ctx.Done():
 		nc.hangup()
 		return nc.ctx.Err()
+	case <-time.After(playbackGuard):
+		nc.log.Warn().Str("line", "announcement").Msg("talk: announcement playback did not finish; continuing")
+		return nil
 	}
 }
 
 func (nc *liveCall) hangup() {
+	nc.cancel()
 	_ = nc.call.Hangup()
 }

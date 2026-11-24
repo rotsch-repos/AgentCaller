@@ -8,8 +8,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/rs/zerolog"
 )
 
 // LLMConfig points at the local vLLM endpoint that generates the spoken answer.
@@ -137,5 +135,3 @@ func stripQuotes(s string) string {
 	}
 	return strings.TrimSpace(s)
 }
-
-var _ = zerolog.Nop // keep zerolog referenced for future logging in this file

@@ -28,10 +28,13 @@ func TestParseTalkArgsLive(t *testing.T) {
 	if cfg.dryRun || cfg.replayPath != "" {
 		t.Fatal("a bare target must be a live call, not dry-run/replay")
 	}
-	home, _ := os.UserHomeDir()
-	want := filepath.Join(home, ".config", "meowcaller", "talk-voip.db")
+	// Expect the same convention as notify: user config dir + separate file name.
+	want := filepath.Join("~", "config", "meowcaller", "talk-voip.db")
+	if base, err := defaultStorePath(); err == nil {
+		want = filepath.Join(filepath.Dir(base), "talk-voip.db")
+	}
 	if cfg.storePath != want {
-		t.Fatalf("store default = %q, want %q (separate from notify)", cfg.storePath, want)
+		t.Fatalf("store default = %q, want %q (separate from notify, platform-correct dir)", cfg.storePath, want)
 	}
 	if cfg.answerTimeout != 45*time.Second {
 		t.Fatalf("answer-timeout default = %s, want 45s (parity with notify)", cfg.answerTimeout)
@@ -88,7 +91,7 @@ func TestParseTalkArgsUsageErrors(t *testing.T) {
 // package needs, including value-taking flags and the `--flag=value` form.
 func TestReorderFlagsFirst(t *testing.T) {
 	var cfg talkConfig
-	flags := newTalkFlagSet(&cfg, io.Discard)
+	flags := newTalkFlagSet(&cfg, io.Discard, "")
 	got := reorderFlagsFirst(flags, []string{
 		"-dry-run", "/tmp/x.wav", "-out-dir", "/tmp/o", "-vad-silence=2s", "trailing",
 	})
@@ -101,6 +104,22 @@ func TestReorderFlagsFirst(t *testing.T) {
 	want = []string{"-out-dir", "/tmp/x.wav"}
 	if strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Fatalf("reorder (dangling flag) = %v, want %v", got, want)
+	}
+	// An unknown -flag stays positional, so the parse fails loudly instead of
+	// silently eating the next token (review, reorderFlagsFirst).
+	got = reorderFlagsFirst(flags, []string{"-unknown-flag", "+41791234567"})
+	want = []string{"-unknown-flag", "+41791234567"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("reorder (unknown flag) = %v, want %v", got, want)
+	}
+}
+
+// TestParseTalkArgsUnknownFlagFails verifies that an unknown dash-flag before the
+// target is a usage error (exit 2), not a silent misparse.
+func TestParseTalkArgsUnknownFlagFails(t *testing.T) {
+	var stderr bytes.Buffer
+	if _, err := parseTalkArgs([]string{"-unknown-flag", "+41791234567"}, &stderr); !errors.Is(err, errUsage) {
+		t.Fatalf("unknown flag before target: want errUsage, got %v", err)
 	}
 }
 
@@ -151,7 +170,7 @@ func TestProcessAudioMissingInput(t *testing.T) {
 func TestNewTalkFlagSetDocumentsUsage(t *testing.T) {
 	var stderr bytes.Buffer
 	var cfg talkConfig
-	flags := newTalkFlagSet(&cfg, &stderr)
+	flags := newTalkFlagSet(&cfg, &stderr, "")
 	flags.Usage()
 	out := stderr.String()
 	for _, want := range []string{"talk [flags] <target>", "-dry-run", "-replay"} {
