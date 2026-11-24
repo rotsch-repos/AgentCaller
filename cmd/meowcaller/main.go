@@ -52,6 +52,12 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 			return err
 		}
 		return runNotify(ctx, cfg, stderr)
+	case "talk":
+		cfg, err := parseTalkArgs(args[1:], stderr)
+		if err != nil {
+			return err
+		}
+		return runTalk(ctx, cfg, stderr)
 	default:
 		printUsage(stderr)
 		return errUsage
@@ -74,4 +80,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "usage:")
 	fmt.Fprintln(w, "  meowcaller pair [flags]")
 	fmt.Fprintln(w, "  meowcaller notify [flags] <target> <audio.mp3|wav|ogg|opus|mulaw|ulaw|->")
+	fmt.Fprintln(w, "  meowcaller talk [flags] <target>           (live VAD→STT→LLM→TTS call)")
+	fmt.Fprintln(w, "  meowcaller talk -dry-run [flags] <input.wav>")
+	fmt.Fprintln(w, "  meowcaller talk -replay <input.wav> [--listen-only] [flags]")
 }

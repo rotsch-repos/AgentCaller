@@ -27,3 +27,19 @@ Flags:
 Pairing is an explicit terminal step so the QR never enters service logs. `notify` refuses an
 unpaired store when run headlessly. The command does not offer diagnostic capture and defaults
 to warning-only structured logs; `MEOW_LOG_LEVEL` opts into a different level.
+
+`meowcaller talk` is the interactive voice menu. It calls `target`, plays a short announcement,
+listens for the recipient's answer, and replies with a generated spoken answer:
+
+```text
+meowcaller talk [flags] <target>
+meowcaller talk -dry-run [flags] <input.wav>
+meowcaller talk -replay <input.wav> [--listen-only] [flags]
+```
+
+Pipeline: announcement → energy-based VAD endpointing (fixed interim line the moment speech
+closes) → local whisper STT → local LLM answer → local piper TTS → hangup. `-dry-run` runs the
+STT+LLM+TTS chain on a WAV without a call; `-replay` feeds a recorded 16 kHz call-frame WAV
+through the VAD (frame-paced, deterministic) and can stop after the endpointing report with
+`--listen-only`. Artifacts (transcript.json, answer.txt, answer.wav/mp3, per-round recordings)
+land in an output directory for inspection.

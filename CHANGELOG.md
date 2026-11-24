@@ -7,6 +7,27 @@ All notable changes to meowcaller, tracked per module. Format loosely follows
 
 ## [Unreleased]
 
+### cmd/meowcaller — interactive voice menu `talk` (VAD → STT → LLM → TTS) — `implemented`
+- Added the `meowcaller talk` subcommand: a state machine that plays a fixed
+  butler-style announcement (or a `-say` file / synthesized `-say-text`),
+  listens with an energy-based VAD sink (adaptive noise floor, 200 ms open
+  debounce, 1 s silence endpoint, 1.5 s minimum speech, 60 s max listen;
+  calibrated on real Opus-decoded call audio that is not in the repository; see the
+  synthetic stand-in `testdata/call-opus16k.wav`
+  and `vad_test.go`), then, in parallel with the fixed interim line
+  "Einen Moment, Sir, ich werde das verarbeiten.", transcribes with the local
+  whisper CLI (GPU pin via `nvidia-smi` headroom check, `CUDA_VISIBLE_DEVICES`,
+  model fallbacks small→base→tiny, CPU fallback — vLLM is never touched),
+  generates a short spoken answer from the local OpenAI-compatible endpoint
+  (`chat_template_kwargs.enable_thinking=false` for Qwen3 thinking builds),
+  and synthesizes it with local piper-tts (de_DE-thorsten-medium), hanging up
+  after playback. Fallback lines guarantee a non-silent call end on empty
+  transcripts or processing failures. `-dry-run` runs STT+LLM+TTS on a WAV
+  without a call; `-replay` (optionally `--listen-only`) replays a recorded
+  16 kHz call-frame WAV through the VAD to verify endpointing deterministically.
+  All intermediate artifacts (transcript.json, answer.txt, answer.wav/mp3,
+  per-round recordings) land in an output directory for inspection.
+
 ### cmd/meowcaller — headless send-only notification calls — `implemented`
 - Added the installable pure-Go `meowcaller pair` and `meowcaller notify` commands for explicit terminal-only linked-device QR setup and one-shot WAV/MP3/Ogg-Opus or raw 8 kHz G.711 PCMU calls, with a user-private cross-platform SQLite store, 45-second answer and 5-minute playback limits (`0` explicitly disables either), EOF hangup, warning-only default logs, no diagnostics, and no mic/speaker/video dependency; calls without a receive sink now discard inbound audio/video before decrypt/decode, while PCMU KATs pin 480-byte/60 ms input to 960-sample/16 kHz call framing. Root and command tests pass; live WhatsApp relay proof remains pending a QR-linked account and approved recipient.
 
