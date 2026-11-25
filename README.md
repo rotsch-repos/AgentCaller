@@ -1,90 +1,199 @@
-# meowcaller
-[![Go Reference](https://pkg.go.dev/badge/github.com/purpshell/meowcaller.svg)](https://pkg.go.dev/github.com/purpshell/meowcaller)
+# AgentCaller
 
-meowcaller is a Go library for the WhatsApp Web VoIP stack. It is 100% pure GO without CGO and it has minimal dependencies. It includes the novel proprietary audio codec MLOW written and validated completely in GO. In turn, meowcaller does not rely on any native bindings and can run everywhere that GO can.
+WhatsApp voice and video calls for software agents, in pure Go.
 
-## Discussion
-Matrix room: [#meowcaller:matrix.org](https://matrix.to/#/#meowcaller:matrix.org).
+AgentCaller places and answers WhatsApp calls from a linked device and gives a
+program both directions of the conversation at once: what the person says comes
+out as PCM, what the agent wants to say goes in as PCM, and the call itself is a
+stream of small JSON events. There is no microphone, no speaker and no CGO. The
+speech recognition, the language model and the voice stay outside, on the other
+end of two pipes, so they can be local, and they can be replaced.
 
-Discord channel: #meowcaller in the [WhiskeySockets Discord server](https://whiskey.so/discord).
+It is a fork of [meowcaller](https://github.com/purpshell/meowcaller) by Rajeh
+Taher, which did the hard part: the WhatsApp call signalling and a pure-Go
+implementation of the MLow audio codec. AgentCaller's work is on what happens
+around the codec so that a call feels immediate. See [Credits](#credits).
 
-You can find the underlying spec in the [WhatsApp Calls Research Group](https://wacrg.org). We are under process of standardizing the spec and moving away from whatsapp-rust source of truth comments.
+> Independent research and interoperability project, not affiliated with Meta or
+> WhatsApp. Read the [disclaimer](DISCLAIMER.md) first. Use it with your own
+> accounts and with people who know they are talking to a machine.
 
-## Usage
-The [godoc](https://pkg.go.dev/github.com/purpshell/meowcaller) includes docs for all methods.
+## Status
 
-There's a range of examples in the [examples](/examples/) directory.
+| Part | State |
+| --- | --- |
+| Outbound audio call, send only (`notify`) | live-tested as `meowcaller notify`; not re-run since the fork (the encoder output is bit-identical) |
+| One question, one answer (`talk`) | built and replay-tested; no live call yet |
+| Two-way pipe (`call`), speech events, barge-in | tested offline against a simulated call; **no live call yet** |
+| New receive path (ordering, loss handling) | tested offline with simulated loss and reordering; **not yet on real traffic** |
+| Video send and receive | tested offline against ffmpeg; **never validated in a live call**, as upstream |
 
-### Headless notifications
+Everything in the "offline" rows is exercised by `go test ./...`. Nothing here
+claims more than that.
 
-The installable `meowcaller` command can place a send-only notification call without opening a microphone, speaker, video device, or inbound audio sink:
+## Quick start
 
 ```sh
-go install github.com/purpshell/meowcaller/cmd/meowcaller@latest
-meowcaller pair
-meowcaller notify +15551234567 notice.wav
-cat notice.mulaw | meowcaller notify +15551234567 -
+git clone https://github.com/rotsch-repos/AgentCaller.git && cd AgentCaller
+go build -o ~/.local/bin/agentcaller ./cmd/agentcaller
+
+# once, in a terminal: scan the QR with the phone the AGENT's number lives on
+agentcaller pair
+
+# a two-way call: stdin is what the agent says, stdout is what the person says
+agentcaller call -in-rate 22050 -events events.jsonl +41790000000 < say.s16le > heard.s16le
 ```
 
-Inputs may be WAV, MP3, Ogg/Opus, or raw 8 kHz mono G.711 PCMU (`.mulaw`, `.ulaw`, or stdin with `-`). PCMU is decoded in 480-byte / 60 ms blocks and expanded to the 16 kHz, 960-sample frames required by the call codec. The command sends silence until the recipient answers, streams the input once, hangs up at EOF, and never decrypts or decodes inbound audio because it does not attach a receive sink.
+A conversation is three processes and two pipes:
 
-`meowcaller pair` displays a linked-device QR in the terminal and exits after the session is ready. Authentication is then reused from `~/Library/Application Support/meowcaller/whatsapp.db` on macOS or the platform user-config equivalent; pass the same `--store` path to `pair` and `notify` when overriding it. The store file is created as `0600`; on Unix its parent directory must be user-private (`0700`) so SQLite sidecars cannot expose linked-device credentials. QR data and media are never written to logs, and command logging defaults to `warn` (set `MEOW_LOG_LEVEL` explicitly for troubleshooting).
+```sh
+mkfifo say heard ctl
+agentcaller call -in say -in-rate 22050 -out heard -control ctl -events events.jsonl -barge-in +41790000000 &
 
-Notifications wait up to 45 seconds for an answer and play for at most 5 minutes by default. Both limits are configurable with `--answer-timeout` and `--max-duration`; `--max-duration=0` explicitly permits an unbounded stream through EOF. Hitting a limit stops playback, hangs up, and exits nonzero.
+# your loop: read `heard` (s16le, 16 kHz, mono), watch events.jsonl for speech_end,
+# transcribe, think, synthesise, write s16le into `say`.
+echo flush  > ctl   # drop what is still queued (the person interrupted)
+echo hangup > ctl
+```
 
-The API is easy to approach and implement: attach a **`Source`** to send media, a **`Sink`** to receive it, and register callbacks for call events.
+Events, one JSON object per line (`t` is seconds since the command started):
 
-A 12-line example to show the power and simplicity of the library:
+```json
+{"event":"ready","t":4.212}
+{"event":"speech_start","t":6.031,"at":1.74}
+{"event":"speech_end","t":8.912,"at":1.74,"duration":2.1}
+{"event":"flushed","t":9.4,"cause":"barge-in","ms":1320}
+{"event":"ended","t":31.07,"reason":"remote hangup"}
+```
+
+`agentcaller call -answer +41790000000` waits for a call from that number and
+answers it; calls from anyone else are left ringing on the phone. All flags:
+`agentcaller call -h`, and [cmd/agentcaller/README.md](cmd/agentcaller/README.md).
+
+## What "instant" means here
+
+Measured on the development machine (Threadripper PRO 7985WX, one core), not in
+a live call. Network and the other phone come on top.
+
+**Sending.** WhatsApp's codec works in 60 ms frames; that is the floor.
+
+| Step | Delay |
+| --- | --- |
+| Waiting for a frame to fill and for the next 60 ms tick | 60 to 120 ms |
+| Resampling the input to 16 kHz (if needed) | 2 ms look-ahead |
+| Encoding one frame | 0.9 ms (was 3.3 ms; output bit-identical) |
+| Codec look-ahead, measured through encoder and decoder | 2.5 ms |
+
+The send loop never waits for the producer. A voice that synthesises in bursts
+or a slow pipe cannot stall the call: missing audio is sent as silence, a
+partial frame waits one tick and then goes out.
+
+**Receiving.** Packets in sequence are decoded and delivered immediately: zero
+added delay, no playout buffer. Only when a packet is missing does the receiver
+hold what came after it, for at most 80 ms or four packets, and then declares
+the packet lost. The timeline stays intact either way, so one second of call is
+always 16000 samples.
+
+**Lost packets are silence, on purpose.** The usual trick is to synthesise a
+plausible continuation. For a human ear that is right. For a speech recogniser
+it is not, and the default here serves the recogniser:
+
+| Loss | Word errors, silent gaps | Word errors, concealment |
+| --- | --- | --- |
+| 10 % | 9 of 108 | 15 of 108 |
+| 20 % | 21 of 108 | 30 of 108 |
+
+(German sentence through the codec, three loss patterns per rate, Whisper
+`small`.) `-conceal`, or `Call.ConcealLosses(true)`, turns the continuation on
+for calls a person listens to.
+
+**Interrupting.** `-barge-in` drops the agent's queued audio 120 ms after the
+person starts to speak. It listens to the incoming audio only, so the echo of
+the agent's own voice from a phone on speaker can trigger it. That needs a live
+test before it is trusted; until then it is opt-in.
+
+**Input quality.** WAV, MP3 and the `-in` stream are converted to 16 kHz with a
+band-limited polyphase resampler (everything above 8.2 kHz is down by 86 dB or
+more; the straight-line interpolation it replaces folded those frequencies into
+the speech band almost unattenuated). Raw G.711 input (`notify -`) still uses
+sample doubling.
+
+## Video
+
+AgentCaller does not encode pixels. It carries H.264 that something else has
+encoded: ffmpeg, a hardware encoder, a browser.
+
+```sh
+ffmpeg -re -i clip.mp4 -an -c:v libx264 -profile:v baseline -tune zerolatency \
+       -g 30 -bsf:v h264_mp4toannexb -f h264 video.fifo &
+agentcaller call -video-in video.fifo -video-out peer.h264 +41790000000
+```
+
+- `rtp.AccessUnitSplitter` cuts an encoder's byte stream into pictures. A byte
+  stream has no frame lengths, so a picture is complete only when the next one
+  begins; the splitter decides that on the first two bytes of the next picture.
+  The cost of feeding video through a pipe is therefore one frame interval.
+- RTP timestamps follow the real frame rate (`SendVideo` stamps the moment of
+  the call, `SendVideoAt` takes a presentation time). The fixed 15 fps step this
+  replaces made a 30 fps stream play at half speed.
+- Checked: split, packetise, depacketise, and ffmpeg decodes the result to the
+  same pictures as the original.
+- Not checked: whether a phone shows the picture. The live video path has never
+  been validated, here or upstream, and an audio call that the person upgrades
+  to video is still work in progress upstream. Treat the flags as experimental.
+
+## Library
+
 ```go
-// wa is a whatsmeow.Client
-client := meowcaller.NewClient(wa)
+client := agentcaller.NewClient(wa) // wa is a connected *whatsmeow.Client
 
-client.OnIncomingCall(func(call *meowcaller.Call) {
-    call.Answer()
+call, _ := client.Call(ctx, "+41790000000")
 
-    if mp3, err := meowcaller.MP3File("hello.mp3"); err == nil {
-        call.Play(mp3)               // stream audio to the caller
-    }
-    if wav, err := meowcaller.WAVRecorder("caller.wav"); err == nil {
-        call.Receive(wav)            // record their voice
-    }
-    if h264, err := meowcaller.AnnexBRecorder("caller.h264"); err == nil {
-        call.ReceiveVideo(h264)      // record their video
-    }
-})
+voice := agentcaller.NewLiveSource(agentcaller.LiveConfig{Rate: 22050})
+call.OnReady(func() { call.Play(voice) })
+call.Receive(agentcaller.SinkFunc(func(pcm []float32) { /* 60 ms, 16 kHz, mono */ }))
 
-// Placing a call is just as short:
-call, _ := client.Call(ctx, "+15551234567")
-call.Receive(meowcaller.SinkFunc(func(pcm []float32) { /* the peer's audio */ }))
+voice.WritePCM16(chunk) // from any goroutine, never blocks
+voice.Flush()           // the person interrupted
 ```
 
-## Features
+| Package | Purpose |
+| --- | --- |
+| `agentcaller` | client, calls, sources and sinks, `LiveSource` |
+| `mlow` | the MLow speech codec (encoder and decoder) |
+| `jitter` | puts received packets in order without a playout delay |
+| `plc` | waveform continuation for lost packets (human listeners) |
+| `resample` | band-limited streaming sample-rate conversion |
+| `rtp`, `srtp`, `stun`, `relay`, `signaling` | the transport underneath |
 
-Core VoIP features are present:
+## Pairing and the session store
 
-- Outbound calls
-- Inbound calls
-- Audio calls (the pure-Go MLow codec)
-- Video calls (ported from WaCalls; see Credits)
-
-Things that are not yet implemented:
-
-- Opus codec fallback for clients not using MLOW (in progress; testing edge cases)
-- Mid-call audio→video upgrade (from-start video calls work; the upgrade handshake is WIP)
-- Group calls (WIP)
-- Call signalling features (raise hand, lobby, reactions)
+`agentcaller pair` shows a QR code. Scan it under *Linked devices* in the
+WhatsApp account the agent calls **from**, not the one it calls. The session is
+kept in `<user config dir>/agentcaller/whatsapp.db` (override with `-store`);
+it is a credential: file mode `0600`, directory `0700`, never in a repository.
+QR codes and media are not logged. `AGENTCALLER_LOG_LEVEL=debug` turns on
+protocol logging.
 
 ## Credits
 
-meowcaller relies heavily on primitives that are implemented in the [WhatsApp Calls Research Group](https://wacrg.org). I thank all the developers who have contributed to it.
+- [meowcaller](https://github.com/purpshell/meowcaller) by Rajeh Taher
+  (purpshell): the WhatsApp VoIP stack and the pure-Go MLow codec this is built
+  on. If AgentCaller is useful to you, [sponsor the original](https://purpshell.dev/sponsor).
+- [steipete/meowcaller](https://github.com/steipete/meowcaller): the headless
+  `pair` and `notify` commands this fork started from.
+- [WaCalls](https://github.com/JotaDev66/WaCalls) by jotadev66: the design of
+  the video call path.
+- The [WhatsApp Calls Research Group](https://wacrg.org) and the whatsapp-rust
+  port that the Go code was validated against.
+- [whatsmeow](https://github.com/tulir/whatsmeow) by Tulir Asokan: the WhatsApp
+  Web client underneath.
 
-meowcaller's video call implementation is built on the design of [WaCalls](https://github.com/JotaDev66/WaCalls) by [jotadev66](https://github.com/JotaDev66). WaCalls in turn vendors meowcaller's MLow impl.
-
-## Sponsoring and contribution
-You may contribute to the maintenance of this library by sponsoring its maintainers on [GitHub](https://purpshell.dev/sponsor).
-
-You may also submit pull requests and issues where relevant, given you follow the contributor [Code of Conduct](CODE_OF_CONDUCT.md).
+The codec work follows the habits of the people who built FFmpeg: keep the
+bitstream exact and prove it with a hash, measure before and after, and write
+down what was not tested.
 
 ## License
 
-This repository follows the MIT license, as stated in the [LICENSE](/LICENSE) file
+MIT, see [LICENSE](LICENSE). Copyright of the original work remains with its
+authors.

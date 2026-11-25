@@ -1,11 +1,38 @@
 # Changelog
 
-All notable changes to meowcaller, tracked per module. Format loosely follows
+All notable changes to AgentCaller (meowcaller before the fork), tracked per module. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/). Each entry notes the module's
 **validation state**: `scaffolded` (signatures + KAT test, bodies are TODO),
 `implemented` (bodies written), or `KAT-verified` (its reference vector passes).
 
 ## [Unreleased]
+
+### AgentCaller: fork, real-time audio and video path
+- **Fork.** Module `github.com/rotsch-repos/agentcaller`, command `agentcaller`.
+  Forked from purpshell/meowcaller by way of steipete's headless CLI fork; licence and
+  credits kept. Log level variable is now `AGENTCALLER_LOG_LEVEL` (`MEOW_LOG_LEVEL` is
+  still read).
+- **mlow: encoder 3.6x faster, output bit-identical** — `KAT-verified` (golden hash
+  over the encoder output). 3.28 ms -> 0.90 ms per 60 ms frame; decoder 75 -> 58 us.
+- **Receive path** (`jitter`, `plc`, `rx.go`) — `implemented`, simulated loss and
+  reordering only. In-sequence packets are delivered with no added delay; behind a gap
+  the receiver holds at most 80 ms or four packets. Lost packets become silence so the
+  timeline stays intact; waveform concealment is opt-in (`Call.ConcealLosses`) because it
+  raised Whisper's word errors (10 % loss: 9 -> 15 of 108; 20 %: 21 -> 30).
+  `Call.ReceiveStats`.
+- **resample: band-limited polyphase resampler** — `implemented`, measured (>= 86 dB
+  alias rejection from 8.2 kHz, 2 ms look-ahead). Replaces linear interpolation in the
+  WAV and MP3 sources. Raw PCMU still uses sample doubling.
+- **`LiveSource`** — `implemented`. A source that is written to from outside and never
+  blocks the 60 ms send loop; `Flush` for interruptions, `MaxBuffered` for live input.
+- **Video** — `implemented`, checked against ffmpeg offline, live path still
+  `NOT VALIDATED`. `rtp.AccessUnitSplitter` (H.264 byte stream to pictures, one frame
+  interval of delay); RTP timestamps from a 90 kHz clock instead of a fixed 15 fps step;
+  `Call.SendVideoAt`.
+- **`agentcaller call`** — `implemented`, tested against a simulated call. Two-way pipe:
+  PCM in, PCM out, JSON-line events (`speech_start`, `speech_end`, ...), control channel
+  (`flush`, `hangup`, `stats`), `-barge-in`, `-answer`, experimental `-video-in` /
+  `-video-out`. `Client.ResolvePeer`, `CallPhase.String`.
 
 ### cmd/meowcaller — interactive voice menu `talk` (VAD → STT → LLM → TTS) — `implemented`
 - Added the `meowcaller talk` subcommand: a state machine that plays a fixed

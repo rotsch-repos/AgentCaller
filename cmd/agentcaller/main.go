@@ -72,10 +72,16 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 
 func commandLogger(out io.Writer) (zerolog.Logger, error) {
 	level := zerolog.WarnLevel
-	if configured := os.Getenv("MEOW_LOG_LEVEL"); configured != "" {
+	name := "AGENTCALLER_LOG_LEVEL"
+	configured := os.Getenv(name)
+	if configured == "" { // the name the command had as meowcaller
+		name = "MEOW_LOG_LEVEL"
+		configured = os.Getenv(name)
+	}
+	if configured != "" {
 		parsed, err := zerolog.ParseLevel(configured)
 		if err != nil {
-			return zerolog.Logger{}, fmt.Errorf("invalid MEOW_LOG_LEVEL: %w", err)
+			return zerolog.Logger{}, fmt.Errorf("invalid %s: %w", name, err)
 		}
 		level = parsed
 	}

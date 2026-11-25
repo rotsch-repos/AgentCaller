@@ -26,7 +26,7 @@ Flags:
 
 Pairing is an explicit terminal step so the QR never enters service logs. `notify` refuses an
 unpaired store when run headlessly. The command does not offer diagnostic capture and defaults
-to warning-only structured logs; `MEOW_LOG_LEVEL` opts into a different level.
+to warning-only structured logs; `AGENTCALLER_LOG_LEVEL` opts into a different level.
 
 `agentcaller talk` is the interactive voice menu. It calls `target`, plays a short announcement,
 listens for the recipient's answer, and replies with a generated spoken answer:
@@ -53,3 +53,41 @@ STT+LLM+TTS chain on a WAV without a call; `-replay` feeds a recorded 16 kHz cal
 through the VAD (frame count rather than wall clock — deterministic, no real-time pacing) and can stop after the endpointing report with
 `--listen-only`. Artifacts (transcript.json, answer.txt, answer.wav/mp3, per-round recordings)
 land in an output directory for inspection.
+
+## call: both directions as pipes
+
+```text
+agentcaller call [flags] <target>
+agentcaller call -answer [flags] <caller|any>
+```
+
+The command carries audio and reports what happens; it does not transcribe, think or
+speak. Whatever drives the conversation reads and writes the pipes.
+
+| Flag | Meaning |
+| --- | --- |
+| `-in PATH` | audio to send: raw s16le mono PCM. `-` is stdin (default), `none` sends silence. A FIFO is opened when the call is answered. |
+| `-in-rate HZ` | sample rate of `-in` (default 16000); converted band-limited |
+| `-out PATH` | the peer's audio: raw s16le mono 16 kHz. `-` is stdout (default, unless it is a terminal), `none` discards |
+| `-events PATH` | JSON-line events (default stderr) |
+| `-control PATH` | commands, one per line: `flush`, `hangup`, `stats` (also `{"cmd":"flush"}`). A FIFO is reopened after each writer. |
+| `-barge-in` | drop the queued outgoing audio when the peer starts to speak |
+| `-end-silence D` | silence that ends a turn (`speech_end`), default 700 ms |
+| `-max-buffer D` | bound the outgoing queue, dropping the oldest audio; for a live microphone. Default 0: queue everything (for synthesised speech), the reader is held back at two seconds. |
+| `-conceal` | synthesise lost packets instead of silence; for human listeners |
+| `-hangup-on-eof` | hang up when `-in` has ended and everything was sent |
+| `-answer-timeout D`, `-max-duration D` | limits; `0` disables |
+| `-video-in PATH`, `-video-fps N`, `-video-out PATH` | experimental H.264 Annex-B pass-through |
+| `-store PATH` | linked-device store |
+
+Events: `connected`, `calling` or `waiting`/`incoming`/`ignored_call`, `state`, `ready`,
+`speech_start {at}`, `speech_end {at, duration}`, `flushed {cause, ms}`, `input_eof`,
+`played`, `stats {...}`, `ended {reason}`. `at` is seconds of received audio, so it
+indexes straight into the `-out` stream (`at * 16000 * 2` bytes).
+
+With `-answer`, only the named caller is answered. Other calls are neither answered nor
+rejected: a reject from a linked device declines the call on the phone too.
+
+Audio that arrives on `-in` before the call is answered is not read, so nothing stale is
+spoken. If the reader of `-out` falls more than three seconds behind, frames are dropped
+and counted in `stats.out_dropped_frames`; the call itself is never held up.

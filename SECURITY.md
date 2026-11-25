@@ -1,6 +1,6 @@
 # Security policy
 
-meowcaller is a library implementation of WhatsApp VoIP and follows the wacrg spec for design decisions. This policy explains how to handle two different kinds of security matters.
+AgentCaller is a library implementation of WhatsApp VoIP and follows the wacrg spec for design decisions. This policy explains how to handle two different kinds of security matters.
 
 ## 1. You found a security issue in WhatsApp itself
 
@@ -17,19 +17,20 @@ reasonable chance to respond.
 
 ## 2. You found a problem with this repository
 
-Use this path for issues that are about meowcaller itself, for example:
+Use this path for issues that are about AgentCaller itself, for example:
 
 - a tooling/CI weakness (e.g. a workflow that could leak a token),
 - a dependency advisory affecting our scripts,
 - **sensitive data that was committed by mistake**: real phone numbers, JIDs, keys,
   tokens, or media (see the [disclaimer](./DISCLAIMER.md)).
-- Bugs that allow attackers to gain remote access to systems using meowcaller.
+- Bugs that allow attackers to gain remote access to systems using AgentCaller.
 
-Please report these **privately**:
+Please report these **privately** through GitHub's **private vulnerability reporting**
+(the "Report a vulnerability" button under this repository's Security tab).
 
-- Preferred: GitHub's **private vulnerability reporting** (the "Report a vulnerability"
-  button under the repository's Security tab), or
-- Email **rajeh@reforward.dev**.
+Problems in the code AgentCaller inherited (the call signalling and the MLow codec) may
+also affect [meowcaller](https://github.com/purpshell/meowcaller); please tell its
+maintainer as well, through that project's own security policy.
 
 For accidental data exposure, also note it so a maintainer can purge it from history
 promptly.
