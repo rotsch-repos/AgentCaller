@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/rotsch-repos/agentcaller"
 )
@@ -40,19 +41,40 @@ type converseConfig struct {
 	simulate    string // WAV file played as the peer instead of a real call
 	record      string // with simulate: WAV of what the agent said
 	recordHeard string // WAV of what the agent heard, as its timeline has it
+	toolsPath   string
+	tools       []callTool
+	toolsWait   string           // said while the first lookup of an answer runs
+	clock       func() time.Time // tells the model date and time with every question; nil: it is not told
 }
 
 // phoneRules is appended to every persona: the answer is heard, not read.
 const phoneRules = "Du führst gerade ein Telefongespräch. Was du schreibst, wird vorgelesen. " +
-	"Antworte in ein bis drei kurzen, natürlichen Sätzen in der Sprache deines Gegenübers. " +
-	"Keine Listen, kein Markdown, keine Emojis, keine Regieanweisungen. " +
-	"Das Gehörte stammt aus einer Spracherkennung und kann Hörfehler enthalten; frag nach, wenn etwas keinen Sinn ergibt."
+	"Sprich wie in einem guten Gespräch unter vier Augen, in der Sprache deines Gegenübers: in ganzen, vollständigen Sätzen, " +
+	"meist zwei bis vier. Will dein Gegenüber etwas erklärt, beschrieben oder erzählt haben, nimm dir Raum, fünf bis acht Sätze, " +
+	"und gib dann das Wort zurück: Es ist ein Gespräch, kein Vortrag. " +
+	"Antworte nie mit einem einzelnen Wort oder einem halben Satz, ausser auf einen Dank oder einen Abschied. " +
+	"Trag das Gespräch mit: Geh auf das Gesagte ein, bring eigene Gedanken, frag nach, wenn dich etwas interessiert. " +
+	"Keine Listen, kein Markdown, keine Emojis, keine Regieanweisungen. Zahlen schreibst du als Ziffern, nicht als Zahlwörter, " +
+	"die Stimme liest sie richtig vor; Messwerte rundest du so, wie man sie im Gespräch sagt. " +
+	"Das Gehörte stammt aus einer Spracherkennung und kann Hörfehler enthalten; ergibt etwas keinen Sinn, frag nach."
+
+// lookupRules follows phoneRules when the agent has tools, noLookupRules when it has none.
+const lookupRules = "Du kannst während des Gesprächs nachschauen; dafür hast du Werkzeuge. Geht es um eine Tatsache, die sich ändern kann " +
+	"oder die du nicht sicher weisst, etwa Wetter, Aktuelles, wer gerade ein Amt hat, Resultate, Preise oder Messwerte, " +
+	"rufst du sofort das passende Werkzeug auf, statt zu raten oder abzulehnen. Kündige das Nachschauen nicht an, " +
+	"und behaupte nie, nachgeschaut zu haben, ohne ein Werkzeug aufgerufen zu haben. " +
+	"Für Plaudern, Meinungen und gesichertes Allgemeinwissen brauchst du kein Werkzeug. " +
+	"Vom Ergebnis erzählst du in eigenen Worten nur das, wonach gefragt war. " +
+	"Was sich auch so nicht klären lässt, erfindest du nicht: Dann sagst du, dass du es nicht weisst."
+
+const noLookupRules = "Nachschauen kannst du in diesem Gespräch nichts. Erfinde keine Tatsachen und behaupte nie, " +
+	"etwas nachgesehen oder erledigt zu haben; weisst du etwas nicht, sagst du das schlicht."
 
 const defaultPersona = "Du bist eine freundliche, aufmerksame Gesprächspartnerin."
 
 // farewell matches a goodbye at the end of what the peer said; the agent answers once
 // more and hangs up.
-var farewell = regexp.MustCompile(`(?i)(tschüss|tschüs|tschau|ciao|auf wiederhören|auf wiedersehen|bis bald|bis später|bis morgen|mach's gut|machs gut|gute nacht|bye|goodbye)[\s.!,]*$`)
+var farewell = regexp.MustCompile(`(?i)(tschüss|tschüs|tschau|ciao|auf wiederhören|auf wiedersehen|bis bald|bis später|bis morgen|mach's gut|machs gut|gute nacht|bye|goodbye|aufhängen|auflegen|(häng|leg)(e|en|st|t)? (\S+ ){0,3}auf)[\s.!,]*$`)
 
 func parseConverseArgs(args []string, stderr io.Writer) (converseConfig, error) {
 	cfg := converseConfig{llm: defaultLLMConfig()}
@@ -71,7 +93,9 @@ func parseConverseArgs(args []string, stderr io.Writer) (converseConfig, error) 
 	flags.DurationVar(&cfg.call.maxDuration, "max-duration", 15*time.Minute, "hang up after this long; 0 disables")
 	flags.StringVar(&cfg.llm.Endpoint, "llm-url", cfg.llm.Endpoint, "base URL of an OpenAI-compatible chat endpoint")
 	flags.StringVar(&cfg.llm.ModelID, "llm-model", cfg.llm.ModelID, "chat model")
-	flags.IntVar(&cfg.llm.MaxTokens, "max-tokens", 220, "upper bound for one answer")
+	flags.IntVar(&cfg.llm.MaxTokens, "max-tokens", 320, "upper bound for one answer")
+	flags.StringVar(&cfg.toolsPath, "tools", "", "JSON file with what the agent may look up during the call: [{name, description, parameters, command, timeout_seconds}]; the command gets the arguments as JSON on stdin and prints its findings")
+	flags.StringVar(&cfg.toolsWait, "tools-wait", "Einen Moment, ich schaue nach.", "what the agent says while a lookup runs (empty: nothing)")
 	flags.StringVar(&cfg.personaPath, "persona", "", "text file with the agent's character (system prompt); the telephone rules are appended")
 	flags.StringVar(&cfg.greeting, "greeting", "", "what the agent says when the call connects (default: the peer speaks first)")
 	flags.StringVar(&cfg.sttURL, "stt-url", "http://127.0.0.1:8000", "base URL of an OpenAI-compatible transcription endpoint")
@@ -120,6 +144,19 @@ func parseConverseArgs(args []string, stderr io.Writer) (converseConfig, error) 
 		cfg.llm.Prompt = strings.TrimSpace(string(raw))
 	}
 	cfg.llm.Prompt += "\n\n" + phoneRules
+	if cfg.toolsPath != "" {
+		tools, err := loadTools(cfg.toolsPath)
+		if err != nil {
+			return cfg, fmt.Errorf("read -tools: %w", err)
+		}
+		cfg.tools = tools
+	}
+	cfg.clock = time.Now
+	if len(cfg.tools) > 0 {
+		cfg.llm.Prompt += " " + lookupRules
+	} else {
+		cfg.llm.Prompt += " " + noLookupRules
+	}
 	return cfg, nil
 }
 
@@ -133,16 +170,19 @@ func runConverse(ctx context.Context, cfg converseConfig, stderr io.Writer) erro
 		defer f.Close()
 		eventsOut = f
 	}
+	var c *conversation
 	chain := voiceChain{
 		listen: func(ctx context.Context, pcm []byte) (string, error) {
 			return transcribeHTTP(ctx, cfg.sttURL, cfg.sttModel, cfg.sttLanguage, pcm)
 		},
-		think: func(ctx context.Context, msgs []chatMessage, sentence func(string)) error {
-			return streamReply(ctx, cfg.llm, msgs, sentence)
+		think: func(ctx context.Context, msgs []chatMessage, out thinkSink) error {
+			return thinkWithTools(ctx, cfg.llm, cfg.tools, cfg.toolsWait, msgs, out, func(event string, fields map[string]any) {
+				c.events.emit(event, fields)
+			})
 		},
 		speak: commandSpeaker(cfg.ttsCmd, cfg.call.inRate),
 	}
-	c := newConversation(cfg, chain, eventsOut)
+	c = newConversation(cfg, chain, eventsOut)
 	if cfg.recordHeard != "" {
 		c.tape = &bytes.Buffer{}
 		defer func() {
@@ -177,9 +217,22 @@ type voiceChain struct {
 	// listen turns 16 kHz s16le mono speech into text.
 	listen func(ctx context.Context, pcm []byte) (string, error)
 	// think answers the conversation so far and hands over one sentence at a time.
-	think func(ctx context.Context, msgs []chatMessage, sentence func(string)) error
+	think func(ctx context.Context, msgs []chatMessage, out thinkSink) error
 	// speak writes text as raw PCM (at the call's input rate) to w until done or cancelled.
 	speak func(ctx context.Context, text string, w io.Writer) error
+}
+
+// thinkSink takes what think produces.
+type thinkSink struct {
+	// sentence is the next sentence of the answer.
+	sentence func(string)
+	// aside is something to say that is not part of the answer: "one moment" while a
+	// lookup runs. It is spoken and forgotten; kept, the model would learn to say it
+	// instead of looking.
+	aside func(string)
+	// looked is a finished lookup, the model's request and what came back. It is kept
+	// with the answer, so that the next question can build on it.
+	looked func([]chatMessage)
 }
 
 // callEvent is what the conversation needs from a duplex event line.
@@ -486,18 +539,27 @@ func (c *conversation) greet(ctx context.Context) {
 		}
 		return
 	}
-	c.remember("", c.cfg.greeting)
+	c.remember("", nil, c.cfg.greeting)
 	c.events.emit("reply", map[string]any{"text": c.cfg.greeting, "greeting": true})
 }
 
-func (c *conversation) remember(user, assistant string) {
+// maxHistory is how many messages of the conversation the model is shown again.
+const maxHistory = 60
+
+func (c *conversation) remember(user string, looked []chatMessage, assistant string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if user != "" {
 		c.history = append(c.history, chatMessage{Role: "user", Content: user})
 	}
+	c.history = append(c.history, looked...)
 	c.history = append(c.history, chatMessage{Role: "assistant", Content: assistant})
-	if extra := len(c.history) - 40; extra > 0 {
+	extra := max(len(c.history)-maxHistory, 0)
+	// Never start in the middle of a lookup: a result without its request is an error to the model.
+	for extra > 0 && extra < len(c.history) && (c.history[extra].Role == "tool" || len(c.history[extra].ToolCalls) > 0) {
+		extra++
+	}
+	if extra > 0 {
 		c.history = append(c.history[:0], c.history[extra:]...)
 	}
 }
@@ -522,7 +584,7 @@ func (c *conversation) answer(ctx context.Context, s segment) {
 		return
 	}
 	text = strings.TrimSpace(text)
-	if text == "" || isTranscriptionNoise(text) {
+	if text == "" || isTranscriptionNoise(text) || tooMuchForItsLength(text, s.dur) {
 		c.events.emit("heard", map[string]any{"text": "", "ignored": text, "at": s.at.Seconds()})
 		c.mu.Lock()
 		owed := len(c.pending) > 0
@@ -542,14 +604,20 @@ func (c *conversation) answer(ctx context.Context, s segment) {
 	user := strings.Join(c.pending, " ")
 	msgs := append([]chatMessage{{Role: "system", Content: c.cfg.llm.Prompt}}, c.history...)
 	c.mu.Unlock()
-	msgs = append(msgs, chatMessage{Role: "user", Content: user})
+	asked := user
+	if c.cfg.clock != nil {
+		// With the question, not in the system prompt: what the model has already read
+		// stays the same from turn to turn, and the server need not read it again.
+		asked = "(" + spokenNow(c.cfg.clock()) + " Das ist eine Angabe des Systems, dein Gegenüber hat sie nicht gesagt.)\n\n" + user
+	}
+	msgs = append(msgs, chatMessage{Role: "user", Content: asked})
 
 	turn, end, ok := c.beginTurn(ctx, false)
 	if !ok {
 		return // the peer is talking again: answer everything at the next pause
 	}
 	defer end()
-	spoken, first, err := c.respond(turn, msgs)
+	spoken, looked, first, err := c.respond(turn, msgs)
 	interrupted := turn.Err() != nil && ctx.Err() == nil
 	if err != nil && !interrupted && ctx.Err() == nil {
 		c.events.emit("reply_error", map[string]any{"error": err.Error()})
@@ -566,8 +634,11 @@ func (c *conversation) answer(ctx context.Context, s segment) {
 	c.mu.Lock()
 	c.pending = nil
 	c.mu.Unlock()
-	c.remember(user, reply)
+	c.remember(user, looked, reply)
 	fields := map[string]any{"text": reply, "interrupted": interrupted}
+	if len(looked) > 0 {
+		fields["looked_up"] = true
+	}
 	if !first.IsZero() {
 		fields["first_audio_ms"] = first.Sub(s.ended).Milliseconds()
 	}
@@ -582,26 +653,46 @@ func (c *conversation) answer(ctx context.Context, s segment) {
 	}
 }
 
-// respond speaks the answer to msgs. spoken holds the sentences that went out in full.
-func (c *conversation) respond(ctx context.Context, msgs []chatMessage) (spoken []string, firstAudio time.Time, err error) {
-	sentences := make(chan string, 32)
-	thought := make(chan error, 1)
-	go func() {
-		thought <- c.chain.think(ctx, msgs, func(s string) {
-			select {
-			case sentences <- s:
-			case <-ctx.Done():
-			}
-		})
-		close(sentences)
-	}()
-	for s := range sentences {
-		if err := c.chain.speak(ctx, s, ctxWriter{ctx: ctx, p: c.say, first: &firstAudio}); err != nil {
-			return spoken, firstAudio, err
-		}
-		spoken = append(spoken, s)
+// respond speaks the answer to msgs. spoken holds the sentences of the answer that went
+// out in full, looked what was looked up for it.
+func (c *conversation) respond(ctx context.Context, msgs []chatMessage) (spoken []string, looked []chatMessage, firstAudio time.Time, err error) {
+	type piece struct {
+		text  string
+		aside bool
 	}
-	return spoken, firstAudio, <-thought
+	pieces := make(chan piece, 32)
+	thought := make(chan error, 1)
+	var found []chatMessage // written by think, read once it has returned
+	say := func(p piece) {
+		select {
+		case pieces <- p:
+		case <-ctx.Done():
+		}
+	}
+	go func() {
+		err := c.chain.think(ctx, msgs, thinkSink{
+			sentence: func(s string) { say(piece{text: s}) },
+			aside:    func(s string) { say(piece{text: s, aside: true}) },
+			looked:   func(m []chatMessage) { found = append(found, m...) },
+		})
+		close(pieces)
+		thought <- err
+	}()
+	for p := range pieces {
+		if err != nil {
+			continue // speaking failed or the peer cut in: let think finish, say no more
+		}
+		if err = c.chain.speak(ctx, p.text, ctxWriter{ctx: ctx, p: c.say, first: &firstAudio}); err == nil && !p.aside {
+			spoken = append(spoken, p.text)
+		}
+	}
+	// Wait for think even after an interruption (it stops with the turn): what was looked
+	// up belongs to the sentences that did go out, or they stand in the history as
+	// numbers from nowhere and teach the model to answer without looking.
+	if thinkErr := <-thought; err == nil {
+		err = thinkErr
+	}
+	return spoken, found, firstAudio, err
 }
 
 // isTranscriptionNoise recognises what Whisper invents for breath, clicks and silence.
@@ -613,6 +704,38 @@ func isTranscriptionNoise(text string) bool {
 		}
 	}
 	return strings.Trim(lower, " .!?…-–♪") == ""
+}
+
+// tooMuchForItsLength catches the other thing Whisper does with a cough or a click: it
+// writes a polite phrase ("Vielen Dank.") that nobody could have said in that time. On
+// the first long live call every such phrase came from a sound of 120 to 360 ms, while
+// what was really said that briefly was a word: "Was?" in 360 ms, "Ja." in 420.
+func tooMuchForItsLength(text string, dur time.Duration) bool {
+	if dur <= 0 || dur >= 600*time.Millisecond {
+		return false
+	}
+	letters := 0
+	for _, r := range text {
+		if unicode.IsLetter(r) {
+			letters++
+		}
+	}
+	const fastest = 25 // letters per second; quick German speech stays under 20
+	if float64(letters) > fastest*dur.Seconds() {
+		return true
+	}
+	return strings.Trim(strings.ToLower(text), " .!?…") == "vielen dank"
+}
+
+var (
+	weekdaysDE = [...]string{"Sonntag", "Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag"}
+	monthsDE   = [...]string{"Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember"}
+)
+
+// spokenNow tells the model the date and time: the one thing it is asked on a telephone
+// that needs no lookup.
+func spokenNow(t time.Time) string {
+	return fmt.Sprintf("Jetzt ist %s, der %d. %s %d, %d Uhr %02d.", weekdaysDE[t.Weekday()], t.Day(), monthsDE[t.Month()-1], t.Year(), t.Hour(), t.Minute())
 }
 
 // simCall stands in for a WhatsApp call: it plays a recording as the peer in real time

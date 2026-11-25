@@ -352,12 +352,13 @@ func TestDuplexBargeInAndControl(t *testing.T) {
 			t.Fatalf("frame %d is not the queued audio", i)
 		}
 	}
-	speech := tone(2, 0.2)
+	speech := tone(3, 0.2)
 	_ = d.WriteFrame(speech[:frameSamples])
+	_ = d.WriteFrame(speech[frameSamples : 2*frameSamples])
 	if d.live.Buffered() == 0 {
-		t.Fatal("a single loud frame already cut the agent off")
+		t.Fatal("two loud frames, a click, already cut the agent off")
 	}
-	_ = d.WriteFrame(speech[frameSamples:])
+	_ = d.WriteFrame(speech[2*frameSamples:])
 	if d.live.Buffered() != 0 {
 		t.Fatalf("%v still queued after the peer started to speak", d.live.Buffered())
 	}

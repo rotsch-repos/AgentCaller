@@ -25,7 +25,7 @@ around the codec so that a call feels immediate. See [Credits](#credits).
 | Outbound audio call, send only (`notify`) | live-tested as `meowcaller notify`; not re-run since the fork (the encoder output is bit-identical) |
 | One question, one answer (`talk`) | built and replay-tested; no live call yet |
 | Two-way pipe (`call`), speech events, barge-in | tested offline against a simulated call; **no live call yet** |
-| Spoken conversation (`converse`): recognition, chat model, speech command | tested offline, and end to end with `-simulate` against real services. **One live call so far, and it failed** after the first answer (see the changelog); the fixes for it are not yet confirmed on a call |
+| Spoken conversation (`converse`): recognition, chat model, speech command | tested offline, and end to end with `-simulate` against real services. After a failed first call, **two live calls on 2026-11-25 held a conversation** over several minutes (see the changelog). Lookups (`-tools`), the click filter and the current phone rules came after those calls and are **not yet confirmed on a call** |
 | New receive path (ordering, loss handling) | tested offline with simulated loss and reordering; **not yet on real traffic** |
 | Video send and receive | tested offline against ffmpeg; **never validated in a live call**, as upstream |
 
@@ -94,6 +94,21 @@ a phone, let a recording play the caller:
 ```sh
 agentcaller converse -simulate caller.wav -record agent.wav -tts-cmd "..." -events events.jsonl
 ```
+
+The agent can look things up while it talks. `-tools tools.json` names commands the
+chat model may call (it must support OpenAI-style tool calls):
+
+```json
+[{"name": "weather", "description": "Current weather and forecast for a place.",
+  "parameters": {"type": "object", "properties": {"place": {"type": "string"}}},
+  "command": "/usr/local/bin/weather-lookup", "timeout_seconds": 15}]
+```
+
+The command gets the arguments as JSON on stdin and answers with text on stdout. If the
+model starts a lookup without a word, `-tools-wait "One moment."` is spoken to bridge
+the silence. A lookup and its result stay in the conversation, so the next question can
+build on them. A command here runs with your rights on whatever the model sends it:
+give it read-only things to do, and treat what a web search returns as hearsay.
 
 Measured that way on one machine (Whisper large-v3 and a 27B model on local GPUs), two
 runs of three turns each: the first sound of the answer left 0.9 s after the pause was

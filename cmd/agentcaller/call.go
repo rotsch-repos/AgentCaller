@@ -165,7 +165,7 @@ func newSpeechGate(endSilence time.Duration) *speechGate {
 	cfg := defaultVADConfig()
 	return &speechGate{
 		cfg:        cfg,
-		openFrames: 2, // 120 ms: one loud frame can be a click
+		openFrames: 3, // 180 ms: a click on a real call lasts up to two frames and must not count as speech
 		endFrames:  max(1, int((endSilence+59*time.Millisecond)/(60*time.Millisecond))),
 		noise:      cfg.NoiseFloorInit,
 	}

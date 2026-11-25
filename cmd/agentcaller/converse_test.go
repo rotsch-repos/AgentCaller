@@ -178,7 +178,8 @@ func (f *fakeChain) chain() voiceChain {
 			f.transcripts = f.transcripts[1:]
 			return text, nil
 		},
-		think: func(ctx context.Context, msgs []chatMessage, sentence func(string)) error {
+		think: func(ctx context.Context, msgs []chatMessage, out thinkSink) error {
+			sentence := out.sentence
 			f.mu.Lock()
 			n := len(f.asked)
 			f.asked = append(f.asked, msgs)
@@ -512,7 +513,7 @@ func TestParseConverseArgs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.call.target != "+41790000000" || cfg.call.inRate != 24000 || !cfg.call.bargeIn || !strings.HasSuffix(cfg.llm.Prompt, phoneRules) {
+	if cfg.call.target != "+41790000000" || cfg.call.inRate != 24000 || !cfg.call.bargeIn || !strings.HasSuffix(cfg.llm.Prompt, phoneRules+" "+noLookupRules) || cfg.clock == nil {
 		t.Fatalf("config %+v", cfg)
 	}
 	for _, bad := range [][]string{
@@ -529,7 +530,7 @@ func TestParseConverseArgs(t *testing.T) {
 		}
 	}
 	for text, want := range map[string]bool{
-		"Danke, tschüss!": true, "Also dann, bis bald.": true, "Ich bleibe bis später im Büro": false, "Ciao ist italienisch, oder?": false,
+		"Danke, tschüss!": true, "Also dann, bis bald.": true, "Gut, dann kannst du jetzt wieder aufhängen.": true, "Okay, gut, dann hängen wir jetzt auf.": true, "Leg bitte auf.": true, "Ich hänge das Bild auf, wenn du magst, und dann reden wir weiter": false, "Ich bleibe bis später im Büro": false, "Ciao ist italienisch, oder?": false,
 	} {
 		if farewell.MatchString(text) != want {
 			t.Fatalf("farewell(%q) = %v", text, !want)

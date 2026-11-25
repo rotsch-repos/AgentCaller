@@ -59,6 +59,33 @@ All notable changes to AgentCaller (meowcaller before the fork), tracked per mod
     (`Client.SendText`). Unit-tested with a fake sender; **not yet sent on a real call**.
   - `converse -record-heard file.wav` writes what the agent heard, as its timeline
     has it. It is a recording of the other person's voice: keep it local.
+- **Second and third live call (2026-11-25): the conversation held**, several minutes
+  each, with questions, answers and interruptions. The peer sent 10 ms packets, and the
+  timeline filled 20.5 s of gaps in one call where the peer sent nothing while silent;
+  both are what the fix above assumed. `-announce` delivered its message.
+  What these calls showed, and what changed after them (**none of it on a call yet**,
+  all of it in the tests and in `-simulate` runs against real services):
+  - **Lookups: `converse -tools file.json`, `-tools-wait "text"`.** The model answered
+    a weather question with numbers it had made up. It can now call commands named in
+    a JSON file (arguments as JSON on stdin, text on stdout, a timeout each, output
+    capped at 6000 bytes, at most four rounds per answer). A failed lookup is told to
+    the model instead of ending the answer. The lookup and its result are kept in the
+    conversation; the bridging phrase is spoken and not kept, because a model that
+    reads it in its own past turns learns to say it instead of looking. Event `lookup`.
+  - **Phone rules rewritten.** The first version asked for one or two short sentences
+    and for saying what the agent cannot do; on the call that came out as clipped
+    answers and repeated disclaimers. The rules now ask for whole sentences, two to
+    four as a rule and five to eight when something is to be explained, numbers as
+    digits, and they say plainly whether lookups are available. `-max-tokens` is 320.
+  - **The date and time** go along with each question, spoken out.
+  - **Clicks.** A click of 120 to 360 ms opened the speech gate, cut the agent off in
+    mid-sentence and was transcribed as "Vielen Dank.". The gate now needs three
+    frames (180 ms) to open, and a transcript that nobody could have said in the time
+    it took (more than 25 letters per second in a segment under 600 ms) is ignored.
+    Event `heard` carries what was ignored.
+  - **Goodbye** also understands "dann hängen wir auf" and "leg bitte auf".
+  - `-simulate` plays a polite caller: at each pause in the recording it waits until
+    the agent has finished, up to 30 s.
 
 ### cmd/meowcaller — interactive voice menu `talk` (VAD → STT → LLM → TTS) — `implemented`
 - Added the `meowcaller talk` subcommand: a state machine that plays a fixed
