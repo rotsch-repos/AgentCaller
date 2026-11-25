@@ -625,7 +625,27 @@ func runCall(ctx context.Context, cfg callConfig, stderr io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("open -out: %w", err)
 	}
+	in := inputReader(cfg.inPath)
+	if in == nil && cfg.hangupOnEOF {
+		return errors.New("-hangup-on-eof needs an -in stream, and stdin is a terminal")
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var outW io.Writer
+	if out != nil {
+		outW = out
+	}
+	var control <-chan string
+	if cfg.controlPath != "" {
+		control = controlLines(ctx, cfg.controlPath)
+	}
+	return placeCall(ctx, cfg, events, stderr, func(call *agentcaller.Call) error {
+		return newDuplex(cfg, events, outW).runWithVideo(ctx, call, in, control)
+	})
+}
 
+// placeCall connects, places or answers the call described by cfg and hands it to run.
+func placeCall(ctx context.Context, cfg callConfig, events *eventLog, stderr io.Writer, run func(*agentcaller.Call) error) error {
 	log := zerolog.Ctx(ctx)
 	session, err := openSession(ctx, cfg.storePath, *log)
 	if err != nil {
@@ -657,21 +677,16 @@ func runCall(ctx context.Context, cfg callConfig, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	return run(call)
+}
 
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	var outW io.Writer
-	if out != nil {
-		outW = out
-	}
-	d := newDuplex(cfg, events, outW)
-	var control <-chan string
-	if cfg.controlPath != "" {
-		control = controlLines(ctx, cfg.controlPath)
-	}
+// runWithVideo is run plus the optional video streams of the call command.
+func (d *duplex) runWithVideo(ctx context.Context, call *agentcaller.Call, in io.Reader, control <-chan string) error {
+	cfg, events := d.cfg, d.events
 	if cfg.videoOut != "" {
 		rec, err := agentcaller.AnnexBRecorder(cfg.videoOut)
 		if err != nil {
+			_ = call.Hangup()
 			return fmt.Errorf("open -video-out: %w", err)
 		}
 		defer rec.Close()
@@ -685,11 +700,6 @@ func runCall(ctx context.Context, cfg callConfig, stderr io.Writer) error {
 			return call.SendVideo(au)
 		}
 		go pumpVideo(ctx, send, v, cfg.videoFPS, d.ready, events)
-	}
-	in := inputReader(cfg.inPath)
-	if in == nil && cfg.hangupOnEOF {
-		_ = call.Hangup()
-		return errors.New("-hangup-on-eof needs an -in stream, and stdin is a terminal")
 	}
 	return d.run(ctx, call, in, control)
 }

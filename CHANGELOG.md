@@ -33,6 +33,13 @@ All notable changes to AgentCaller (meowcaller before the fork), tracked per mod
   PCM in, PCM out, JSON-line events (`speech_start`, `speech_end`, ...), control channel
   (`flush`, `hangup`, `stats`), `-barge-in`, `-answer`, experimental `-video-in` /
   `-video-out`. `Client.ResolvePeer`, `CallPhase.String`.
+- **`agentcaller converse`** — `implemented`, tested offline (scripted call, fake
+  services) and end to end with `-simulate` against real services; **no live call yet**.
+  A spoken conversation on the duplex: speech recognition over HTTP, a streaming chat
+  endpoint, and a speech command, with sentence-wise synthesis, barge-in, merged turns and
+  a goodbye that ends the call. Simulated answer delay: typically 0.9 s from the reported
+  pause to the first audio (0.9 to 1.9 s over six turns). Echo on a real call (the agent hearing itself and interrupting itself)
+  is untested.
 
 ### cmd/meowcaller — interactive voice menu `talk` (VAD → STT → LLM → TTS) — `implemented`
 - Added the `meowcaller talk` subcommand: a state machine that plays a fixed
