@@ -32,6 +32,25 @@ const (
 	CallPhaseEnded
 )
 
+// String returns the phase as a lower-case word, for logs and events.
+func (p CallPhase) String() string {
+	switch p {
+	case CallPhaseIdle:
+		return "idle"
+	case CallPhaseCalling:
+		return "calling"
+	case CallPhaseRinging:
+		return "ringing"
+	case CallPhaseConnecting:
+		return "connecting"
+	case CallPhaseActive:
+		return "active"
+	case CallPhaseEnded:
+		return "ended"
+	}
+	return "unknown"
+}
+
 // CallSession is the per-call signaling state with validated phase transitions.
 type CallSession struct {
 	CallID      string

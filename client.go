@@ -7,6 +7,7 @@ import (
 	"github.com/rotsch-repos/agentcaller/diag"
 	"github.com/rs/zerolog"
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/types"
 )
 
 // Client is the managed entry point to the WhatsApp 1:1 calling stack. It wraps a
@@ -43,6 +44,12 @@ func NewClient(wa *whatsmeow.Client, opts ...Option) *Client {
 // endpoint arrives.
 func (c *Client) Call(ctx context.Context, target string) (*Call, error) {
 	return c.eng.placeCall(ctx, target)
+}
+
+// ResolvePeer maps a call target (a phone number, a phone JID, or an @lid JID) to the LID
+// that Call.Peer reports, so an inbound call can be matched against an expected caller.
+func (c *Client) ResolvePeer(ctx context.Context, target string) (types.JID, error) {
+	return resolvePeerLID(ctx, c.wa, target)
 }
 
 // OnIncomingCall registers the listener fired for each inbound call offer. The handler
