@@ -87,9 +87,18 @@ agentcaller converse \
 ```
 
 The answer is spoken sentence by sentence while the model is still writing, the agent
-stops when the person starts to talk, a pause that turns out not to be the end is
+stops when the person talks into it, a pause that turns out not to be the end is
 merged with what follows, and a goodbye ends the call. To hear the whole chain without
-a phone, let a recording play the caller:
+a phone, let a recording play the caller.
+
+Three settings came out of real calls. A sound has to last 480 ms before the agent stops
+for it (`-barge-in-after`): line noise and the echo of the agent's own voice lasted 120 to
+360 ms and cut answers off in the middle of a sentence; they are still listened to, and
+thrown away when they turn out to be nothing. `-greeting-delay 1500ms` waits for the
+phone to reach the ear, and a greeting that a noise did cut off is said again. `-hangup`
+says when the agent ends the call: after a `goodbye` (default), only when `asked` to hang
+up, or `never`. A noise once came out of the recogniser as "Bye." and ended a call.
+
 
 ```sh
 agentcaller converse -simulate caller.wav -record agent.wav -tts-cmd "..." -events events.jsonl
@@ -164,10 +173,12 @@ it is not, and the default here serves the recogniser:
 `small`.) `-conceal`, or `Call.ConcealLosses(true)`, turns the continuation on
 for calls a person listens to.
 
-**Interrupting.** `-barge-in` drops the agent's queued audio 120 ms after the
-person starts to speak. It listens to the incoming audio only, so the echo of
-the agent's own voice from a phone on speaker can trigger it. That needs a live
-test before it is trusted; until then it is opt-in.
+**Interrupting.** `-barge-in` drops the agent's queued audio once the person has
+been speaking for `-barge-in-after` (480 ms; the event is `speech_sustained`).
+`speech_start` still comes after 180 ms, so nothing is lost for the recogniser. It
+listens to the incoming audio only: on live calls the echo of the agent's own voice and
+line noise opened it for 120 to 360 ms, which is why the first version, cutting at
+`speech_start`, stopped the agent in the middle of sentences. Still opt-in for `call`.
 
 **Input quality.** WAV, MP3 and the `-in` stream are converted to 16 kHz with a
 band-limited polyphase resampler (everything above 8.2 kHz is down by 86 dB or

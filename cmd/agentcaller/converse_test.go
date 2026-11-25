@@ -561,7 +561,7 @@ func TestConversationAnswersAfterNoise(t *testing.T) {
 	for len(chain.questions()) == 0 {
 		time.Sleep(time.Millisecond)
 	}
-	l.peerSays(3)
+	l.peerSays(10) // long enough to cut the answer off
 	if e := l.await("heard", 2); e["ignored"] != "Untertitelung des ZDF, 2020" {
 		t.Fatalf("the noise was not ignored: %v", e)
 	}
@@ -621,5 +621,100 @@ func TestConversationReportsBackgroundWork(t *testing.T) {
 	last := asked[1][len(asked[1])-1]
 	if last.Role != "user" || !strings.Contains(last.Content, `{"was":"nachsehen"} -> gefunden`) || !strings.Contains(last.Content, "Meldung des Systems") {
 		t.Fatalf("the model was not shown the outcome: %+v", last)
+	}
+}
+
+// A short sound from the other end (a cough, an echo of the agent's own voice) is
+// listened to but does not cut the answer off: it plays to its end.
+func TestConversationShortNoiseDoesNotInterrupt(t *testing.T) {
+	chain := &fakeChain{
+		transcripts:    []string{"Erzähl mir etwas.", "Vielen Dank."},
+		replies:        [][]string{{"Satz eins.", "Satz zwei.", "Satz drei.", "Satz vier."}},
+		sentenceFrames: 10,
+	}
+	l := startLine(t, converseConfig{llm: LLMConfig{Prompt: "P"}}, chain.chain())
+	l.peerSays(10)
+	l.awaitSent(3)
+	l.peerSays(6) // 360 ms: the longest noise on a real call so far
+	e := l.await("reply", 1)
+	if e["interrupted"] != false || e["text"] != "Satz eins. Satz zwei. Satz drei. Satz vier." {
+		t.Fatalf("reply: %v", e)
+	}
+	if e := l.await("heard", 2); e["ignored"] != "Vielen Dank." {
+		t.Fatalf("the noise was taken for speech: %v", e)
+	}
+	if n := len(l.all("flushed")); n != 0 {
+		t.Fatalf("%d flushes for a noise; events:\n%s", n, l.events.String())
+	}
+	l.cancel()
+	if err := <-l.result; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A noise that does last cuts the greeting off like any answer; since nothing was
+// said, the greeting is spoken again instead of leaving the line silent.
+func TestConversationGreetsAgainAfterNoise(t *testing.T) {
+	chain := &fakeChain{transcripts: []string{"Untertitelung des ZDF, 2020"}, sentenceFrames: 20}
+	cfg := converseConfig{greeting: "Hallo, hier bin ich.", greetAfter: 50 * time.Millisecond, llm: LLMConfig{Prompt: "P"}}
+	l := startLine(t, cfg, chain.chain())
+	l.awaitSent(3)
+	l.peerSays(10)
+	if e := l.await("heard", 1); e["ignored"] != "Untertitelung des ZDF, 2020" {
+		t.Fatalf("heard: %v", e)
+	}
+	if e := l.await("reply", 1); e["text"] != "Hallo, hier bin ich." || e["greeting"] != true {
+		t.Fatalf("greeting after the noise: %v", e)
+	}
+	l.cancel()
+	if err := <-l.result; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// With -hangup asked a goodbye is answered like anything else and the line stays open:
+// ending the call is the peer's business, unless it asks the agent to hang up. (A noise
+// once came out of the recogniser as "Bye." and ended a real call.)
+func TestConversationHangupAsked(t *testing.T) {
+	chain := &fakeChain{
+		transcripts:    []string{"Bye.", "Bist du noch da?", "Gut, dann kannst du jetzt wieder aufhängen."},
+		replies:        [][]string{{"Bis bald."}, {"Ja, ich bin da."}, {"Mach ich."}},
+		sentenceFrames: 5,
+	}
+	l := startLine(t, converseConfig{hangup: "asked", llm: LLMConfig{Prompt: "P"}}, chain.chain())
+	l.peerSays(10)
+	if e := l.await("reply", 1); e["text"] != "Bis bald." {
+		t.Fatalf("reply: %v", e)
+	}
+	l.awaitSent(5)
+	time.Sleep(700 * time.Millisecond) // past the point where the agent would have hung up
+	l.peerSays(10)
+	if e := l.await("reply", 2); e["text"] != "Ja, ich bin da." {
+		t.Fatalf("second reply: %v", e)
+	}
+	if n := len(l.all("ended")); n != 0 {
+		t.Fatalf("the agent ended the call; events:\n%s", l.events.String())
+	}
+	l.awaitSent(5)
+	l.peerSays(10)
+	select {
+	case err := <-l.result:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the agent did not hang up when asked to")
+	}
+	for said, want := range map[string]bool{
+		"Tschüss, bis bald!": false, "Gute Nacht.": false, "Bye.": false,
+		"Okay, gut, dann hängen wir jetzt auf.": true, "Leg bitte auf.": true,
+		"Ich hänge jetzt auf und du rufst mich gleich nochmal an.": false,
+	} {
+		if got := (converseConfig{hangup: "asked"}).hangsUp(said); got != want {
+			t.Errorf("asked: %q hangs up = %v", said, got)
+		}
+		if (converseConfig{hangup: "never"}).hangsUp(said) {
+			t.Errorf("never: %q hangs up", said)
+		}
 	}
 }

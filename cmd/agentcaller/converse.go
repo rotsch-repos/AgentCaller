@@ -33,11 +33,13 @@ type converseConfig struct {
 	llm         LLMConfig
 	personaPath string
 	greeting    string
+	greetAfter  time.Duration
 	sttURL      string
 	sttModel    string
 	sttLanguage string
 	ttsCmd      string
 	noBargeIn   bool
+	hangup      string // when the agent ends the call: goodbye, asked, never
 	simulate    string // WAV file played as the peer instead of a real call
 	record      string // with simulate: WAV of what the agent said
 	recordHeard string // WAV of what the agent heard, as its timeline has it
@@ -74,6 +76,21 @@ const defaultPersona = "Du bist eine freundliche, aufmerksame Gesprächspartneri
 
 // farewell matches a goodbye at the end of what the peer said; the agent answers once
 // more and hangs up.
+// hangupAsked is the narrower rule of -hangup asked: only a request to hang up, not a
+// goodbye. A noise on a real call once came out of the recogniser as "Bye." and ended it.
+var hangupAsked = regexp.MustCompile(`(?i)(aufhängen|auflegen|(häng|leg)(e|en|st|t)? (\S+ ){0,3}auf)[\s.!,]*$`)
+
+// hangsUp reports whether what the peer said ends the call from the agent's side.
+func (cfg converseConfig) hangsUp(said string) bool {
+	switch cfg.hangup {
+	case "never":
+		return false
+	case "asked":
+		return hangupAsked.MatchString(said)
+	}
+	return farewell.MatchString(said)
+}
+
 var farewell = regexp.MustCompile(`(?i)(tschüss|tschüs|tschau|ciao|auf wiederhören|auf wiedersehen|bis bald|bis später|bis morgen|mach's gut|machs gut|gute nacht|bye|goodbye|aufhängen|auflegen|(häng|leg)(e|en|st|t)? (\S+ ){0,3}auf)[\s.!,]*$`)
 
 func parseConverseArgs(args []string, stderr io.Writer) (converseConfig, error) {
@@ -98,11 +115,14 @@ func parseConverseArgs(args []string, stderr io.Writer) (converseConfig, error) 
 	flags.StringVar(&cfg.toolsWait, "tools-wait", "Einen Moment, ich schaue nach.", "what the agent says while a lookup runs (empty: nothing)")
 	flags.StringVar(&cfg.personaPath, "persona", "", "text file with the agent's character (system prompt); the telephone rules are appended")
 	flags.StringVar(&cfg.greeting, "greeting", "", "what the agent says when the call connects (default: the peer speaks first)")
+	flags.DurationVar(&cfg.greetAfter, "greeting-delay", 0, "how long the agent waits after the call connects before it greets: the phone has to reach the ear")
 	flags.StringVar(&cfg.sttURL, "stt-url", "http://127.0.0.1:8000", "base URL of an OpenAI-compatible transcription endpoint")
 	flags.StringVar(&cfg.sttModel, "stt-model", "large-v3", "transcription model")
 	flags.StringVar(&cfg.sttLanguage, "stt-language", "de", "language hint for the transcription")
 	flags.StringVar(&cfg.ttsCmd, "tts-cmd", "", "speech command, run by sh: text on stdin, raw s16le mono PCM on stdout (required)")
 	flags.IntVar(&cfg.call.inRate, "tts-rate", agentcaller.SampleRate, "sample rate of the speech command's output in Hz")
+	flags.StringVar(&cfg.hangup, "hangup", "goodbye", "when the agent ends the call after its answer: goodbye (the peer said goodbye), asked (only when the peer asks it to hang up), never")
+	flags.DurationVar(&cfg.call.bargeAfter, "barge-in-after", defaultBargeAfter, "how long the peer must have been speaking before the agent stops for it: a cough, a short \"ja\" or an echo of the agent's own voice is shorter")
 	flags.BoolVar(&cfg.noBargeIn, "no-barge-in", false, "let the agent finish its answer even when the peer starts to talk")
 	flags.StringVar(&cfg.simulate, "simulate", "", "no call: play this WAV as the peer (it waits for the agent at each pause) and run the real chain")
 	flags.StringVar(&cfg.record, "record", "", "with -simulate: write what the agent said to this WAV")
@@ -122,6 +142,8 @@ func parseConverseArgs(args []string, stderr io.Writer) (converseConfig, error) 
 		return cfg, errUsage
 	case cfg.ttsCmd == "":
 		return cfg, errors.New("-tts-cmd is required")
+	case cfg.hangup != "goodbye" && cfg.hangup != "asked" && cfg.hangup != "never":
+		return cfg, errors.New("-hangup must be goodbye, asked or never")
 	case cfg.call.answerTimeout < 0 || cfg.call.maxDuration < 0 || cfg.call.endSilence <= 0:
 		return cfg, errors.New("durations must be non-negative (-end-silence positive)")
 	case cfg.call.inRate < 4000 || cfg.call.inRate > 192000:
@@ -262,7 +284,7 @@ func (t *eventTap) Write(line []byte) (int, error) {
 	var e callEvent
 	if json.Unmarshal(line, &e) == nil {
 		switch e.Event {
-		case "ready", "speech_start", "speech_end":
+		case "ready", "speech_start", "speech_sustained", "speech_end":
 			select {
 			case t.ch <- e:
 			default:
@@ -429,6 +451,7 @@ type conversation struct {
 	history    []chatMessage
 	pending    []string // heard but not answered yet
 	jobs       int      // background work under way
+	greetOwed  bool     // the greeting is due and has not been said to the end
 	life       context.Context
 }
 
@@ -488,8 +511,13 @@ func (c *conversation) follow(ctx context.Context) {
 					queue(segment{greeting: true})
 				}
 			case "speech_start":
+				// The agent does not start to talk into this, but it is not cut off
+				// either until the sound has lasted (speech_sustained).
 				c.mu.Lock()
 				c.peerTalks = true
+				c.mu.Unlock()
+			case "speech_sustained":
+				c.mu.Lock()
 				stop := c.cancelTurn
 				c.mu.Unlock()
 				if c.cfg.noBargeIn {
@@ -556,6 +584,30 @@ func (c *conversation) beginTurn(ctx context.Context, force bool) (turn context.
 }
 
 func (c *conversation) greet(ctx context.Context) {
+	// Whoever accepts a call on a phone still has to lift it: a greeting that starts with
+	// the connection is half over by then.
+	c.mu.Lock()
+	c.greetOwed = true
+	c.mu.Unlock()
+	select {
+	case <-time.After(c.cfg.greetAfter):
+	case <-ctx.Done():
+		return
+	}
+	c.sayGreeting(ctx)
+}
+
+// sayGreeting speaks the greeting if it is still owed. A sound from the other end cuts
+// it short like any answer; if that sound turns out to be no speech (the click of
+// picking up), answer says the greeting again, and if it was speech, the peer has
+// opened the conversation and gets an answer instead.
+func (c *conversation) sayGreeting(ctx context.Context) {
+	c.mu.Lock()
+	owed := c.greetOwed
+	c.mu.Unlock()
+	if !owed {
+		return
+	}
 	turn, end, _ := c.beginTurn(ctx, true)
 	defer end()
 	err := c.chain.speak(turn, c.cfg.greeting, ctxWriter{ctx: turn, p: c.say})
@@ -565,6 +617,9 @@ func (c *conversation) greet(ctx context.Context) {
 		}
 		return
 	}
+	c.mu.Lock()
+	c.greetOwed = false
+	c.mu.Unlock()
 	c.remember("", nil, c.cfg.greeting)
 	c.events.emit("reply", map[string]any{"text": c.cfg.greeting, "greeting": true})
 }
@@ -709,11 +764,15 @@ func (c *conversation) answer(ctx context.Context, s segment) {
 		owed := len(c.pending) > 0
 		c.mu.Unlock()
 		if !owed {
+			c.sayGreeting(ctx) // if that noise cut off the greeting
 			return
 		}
 		text = "" // a noise cut off the answer to what was said before: it is still owed
 	} else {
 		c.events.emit("heard", map[string]any{"text": text, "at": s.at.Seconds(), "stt_ms": time.Since(sttStart).Milliseconds()})
+		c.mu.Lock()
+		c.greetOwed = false // the peer spoke first
+		c.mu.Unlock()
 	}
 
 	c.mu.Lock()
@@ -763,7 +822,7 @@ func (c *conversation) answer(ctx context.Context, s segment) {
 	}
 	c.events.emit("reply", fields)
 
-	if !interrupted && farewell.MatchString(user) {
+	if !interrupted && c.cfg.hangsUp(user) {
 		select {
 		case <-turn.Done(): // the peer had more to say
 		case <-time.After(c.say.remaining() + 500*time.Millisecond):

@@ -85,6 +85,17 @@ All notable changes to AgentCaller (meowcaller before the fork), tracked per mod
     announced a lookup and called nothing in up to 2 of 8. When an answer reads like
     such an announcement and no tool was called, the model is asked once, unheard, to
     call it (8 of 8 in four such cases; chit-chat answered "nothing" in 15 of 16).
+  - **Fourth and fifth live call (2026-11-25): cut off by noises.** The first errand on
+    a live call worked (the agent handed a request on and it was carried out). Three
+    faults, all fixed: (1) Sounds of 180 to 300 ms, which the transcript filter rightly
+    threw away, had already cut off the greeting and an answer in mid-sentence, because
+    the agent stopped at `speech_start`. It now stops only when the sound has lasted
+    (`speech_sustained`, `-barge-in-after`, 480 ms; over all calls so far noises lasted
+    120 to 360 ms, the shortest real interjections 420 to 600 ms). A greeting that is
+    cut off all the same is said again. (2) The greeting came before the phone was at the
+    ear: `-greeting-delay`. (3) A 300 ms noise was transcribed as "Bye." and the agent
+    hung up: `-hangup goodbye|asked|never`. Also seen: an errand's command is killed with
+    the call, so a tool that must finish its work has to detach itself.
   - **Phone rules rewritten.** The first version asked for one or two short sentences
     and for saying what the agent cannot do; on the call that came out as clipped
     answers and repeated disclaimers. The rules now ask for whole sentences, two to
