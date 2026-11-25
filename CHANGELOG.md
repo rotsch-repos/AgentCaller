@@ -54,6 +54,9 @@ All notable changes to AgentCaller (meowcaller before the fork), tracked per mod
     `rx_gap_fill_ms` and `rx_packet_samples` (samples per packet → count) to see it.
   - A short noise right after a question stopped the answer on its way, was then
     discarded as noise, and the question was never answered. It is answered now.
+  - `call` / `converse -announce "text"` send the target a text message two seconds
+    before calling, to say who calls when several agents share one account
+    (`Client.SendText`). Unit-tested with a fake sender; **not yet sent on a real call**.
   - `converse -record-heard file.wav` writes what the agent heard, as its timeline
     has it. It is a recording of the other person's voice: keep it local.
 

@@ -65,6 +65,7 @@ func parseConverseArgs(args []string, stderr io.Writer) (converseConfig, error) 
 	flags.BoolVar(&cfg.call.answer, "answer", false, "wait for an incoming call from <caller> and answer it, instead of calling")
 	flags.StringVar(&cfg.call.storePath, "store", defaultStore, "linked-device SQLite store")
 	flags.StringVar(&cfg.call.eventsPath, "events", "", "write JSON-line events here (default stderr)")
+	flags.StringVar(&cfg.call.announce, "announce", "", "send the target this text message two seconds before calling (the ringing screen only shows the account)")
 	flags.DurationVar(&cfg.call.endSilence, "end-silence", 700*time.Millisecond, "pause after which the peer's turn counts as finished")
 	flags.DurationVar(&cfg.call.answerTimeout, "answer-timeout", defaultAnswerTimeout, "maximum wait for the call to be answered (or to arrive, with -answer); 0 disables")
 	flags.DurationVar(&cfg.call.maxDuration, "max-duration", 15*time.Minute, "hang up after this long; 0 disables")
@@ -101,6 +102,8 @@ func parseConverseArgs(args []string, stderr io.Writer) (converseConfig, error) 
 		return cfg, errors.New("durations must be non-negative (-end-silence positive)")
 	case cfg.call.inRate < 4000 || cfg.call.inRate > 192000:
 		return cfg, errors.New("-tts-rate must be between 4000 and 192000")
+	case cfg.call.announce != "" && (cfg.call.answer || cfg.simulate != ""):
+		return cfg, errors.New("-announce is for calls that are placed, not with -answer or -simulate")
 	case cfg.record != "" && cfg.simulate == "":
 		return cfg, errors.New("-record needs -simulate")
 	}

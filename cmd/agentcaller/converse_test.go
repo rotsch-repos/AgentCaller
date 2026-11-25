@@ -520,6 +520,8 @@ func TestParseConverseArgs(t *testing.T) {
 		{"-tts-cmd", "say"}, // nobody to call
 		{"-tts-cmd", "say", "-record", "a.wav", "x"}, // -record without -simulate
 		{"-tts-cmd", "say", "-simulate", "a.wav", "x"},
+		{"-tts-cmd", "say", "-simulate", "a.wav", "-announce", "Alice ruft an"},
+		{"-tts-cmd", "say", "-answer", "-announce", "Alice ruft an", "any"},
 		{"-tts-cmd", "say", "-persona", "/nonexistent/persona.md", "x"},
 	} {
 		if _, err := parseConverseArgs(bad, &stderr); err == nil {

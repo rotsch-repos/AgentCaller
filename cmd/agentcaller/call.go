@@ -45,6 +45,30 @@ type callConfig struct {
 	videoIn       string
 	videoOut      string
 	videoFPS      float64
+	announce      string // text message sent to the target just before the call
+}
+
+// announceLead is how long the message has to show up on the phone before it rings.
+const announceLead = 2 * time.Second
+
+// announceCall tells the target by text who is about to call. A message that cannot be
+// sent is reported and does not stop the call.
+func announceCall(ctx context.Context, cfg callConfig, events *eventLog, send func(context.Context, string, string) error, lead time.Duration) {
+	if cfg.announce == "" {
+		return
+	}
+	sendCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	err := send(sendCtx, cfg.target, cfg.announce)
+	cancel()
+	if err != nil {
+		events.emit("announce_error", map[string]any{"error": err.Error()})
+		return
+	}
+	events.emit("announced", map[string]any{"text": cfg.announce})
+	select {
+	case <-time.After(lead):
+	case <-ctx.Done():
+	}
 }
 
 func parseCallArgs(args []string, stderr io.Writer) (callConfig, error) {
@@ -60,6 +84,7 @@ func parseCallArgs(args []string, stderr io.Writer) (callConfig, error) {
 	flags.StringVar(&cfg.inPath, "in", "-", "audio to send: raw s16le mono PCM from this file or FIFO; - is stdin, none sends silence")
 	flags.StringVar(&cfg.outPath, "out", "-", "received audio: raw s16le mono 16 kHz PCM to this file or FIFO; - is stdout, none discards")
 	flags.StringVar(&cfg.eventsPath, "events", "", "write JSON-line events here (default stderr)")
+	flags.StringVar(&cfg.announce, "announce", "", "send the target this text message two seconds before calling (the ringing screen only shows the account)")
 	flags.StringVar(&cfg.controlPath, "control", "", "read commands from this file or FIFO, one per line: flush, hangup, stats")
 	flags.IntVar(&cfg.inRate, "in-rate", agentcaller.SampleRate, "sample rate of -in in Hz (resampled to 16 kHz)")
 	flags.DurationVar(&cfg.maxBuffer, "max-buffer", 0, "bound the queued outgoing audio, dropping the oldest (for a live microphone); 0 queues everything (for speech synthesis)")
@@ -86,6 +111,8 @@ func parseCallArgs(args []string, stderr io.Writer) (callConfig, error) {
 	}
 	cfg.target = flags.Arg(0)
 	switch {
+	case cfg.answer && cfg.announce != "":
+		return cfg, errors.New("-announce is for calls that are placed, not with -answer")
 	case cfg.answerTimeout < 0 || cfg.maxDuration < 0 || cfg.maxBuffer < 0 || cfg.endSilence <= 0:
 		return cfg, errors.New("durations must be non-negative (-end-silence positive)")
 	case cfg.inRate < 4000 || cfg.inRate > 192000:
@@ -746,6 +773,7 @@ func placeCall(ctx context.Context, cfg callConfig, events *eventLog, stderr io.
 	if cfg.answer {
 		call, err = awaitCaller(ctx, client, cfg, incoming, events)
 	} else {
+		announceCall(ctx, cfg, events, client.SendText, announceLead)
 		events.emit("calling", map[string]any{"target": cfg.target})
 		call, err = client.Call(ctx, cfg.target)
 	}

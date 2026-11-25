@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -578,5 +579,45 @@ func TestDuplexFillsSilenceWhenNothingArrives(t *testing.T) {
 	}
 	if starts := strings.Count(evBuf.String(), "speech_start"); starts != 2 {
 		t.Fatalf("%d speech_start events, want 2", starts)
+	}
+}
+
+// The announcement goes to the target before the call; if it cannot be sent, the call
+// is placed anyway and without the wait.
+func TestAnnounceCall(t *testing.T) {
+	var evBuf lockedBuffer
+	events := &eventLog{w: &evBuf, start: time.Now()}
+	var got []string
+	send := func(_ context.Context, target, text string) error {
+		got = append(got, target+": "+text)
+		return nil
+	}
+	announceCall(context.Background(), callConfig{target: "+41790000000"}, events, send, time.Hour)
+	if len(got) != 0 || evBuf.String() != "" {
+		t.Fatalf("announced without a text: %v %s", got, evBuf.String())
+	}
+	begun := time.Now()
+	announceCall(context.Background(), callConfig{target: "+41790000000", announce: "Alice ruft an"}, events, send, 50*time.Millisecond)
+	if waited := time.Since(begun); waited < 50*time.Millisecond {
+		t.Fatalf("called %v after the message", waited)
+	}
+	if len(got) != 1 || got[0] != "+41790000000: Alice ruft an" {
+		t.Fatalf("sent %v", got)
+	}
+	fail := func(context.Context, string, string) error { return errors.New("not reachable") }
+	begun = time.Now()
+	announceCall(context.Background(), callConfig{target: "x", announce: "Alice ruft an"}, events, fail, time.Hour)
+	if time.Since(begun) > 5*time.Second {
+		t.Fatal("waited although nothing was sent")
+	}
+	evs, names := parseEvents(t, evBuf.String())
+	if !reflect.DeepEqual(names, []string{"announced", "announce_error"}) || evs[0]["text"] != "Alice ruft an" || evs[1]["error"] != "not reachable" {
+		t.Fatalf("events: %s", evBuf.String())
+	}
+	if _, err := parseCallArgs([]string{"-answer", "-announce", "x", "any"}, io.Discard); err == nil {
+		t.Fatal("-announce with -answer was accepted")
+	}
+	if cfg, err := parseCallArgs([]string{"-announce", "Alice ruft an", "+41790000000"}, io.Discard); err != nil || cfg.announce != "Alice ruft an" {
+		t.Fatalf("config %+v, %v", cfg, err)
 	}
 }
