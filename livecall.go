@@ -2,6 +2,7 @@ package agentcaller
 
 import (
 	"sync"
+	"time"
 
 	"go.mau.fi/whatsmeow/types"
 )
@@ -154,10 +155,21 @@ func (c *Call) ReceiveStats() ReceiveStats {
 // SendVideo sends one already-encoded H.264 access unit (Annex-B) to the peer — fed from an
 // external encoder (browser WebCodecs, ffmpeg, hardware). Returns an error if the call has no
 // active video media yet. agentcaller does not encode pixels (no pure-Go H.264 encoder); this
-// is the video analog of writing a sample to a track.
+// is the video analog of writing a sample to a track. The picture is timestamped with the
+// moment of the call, so any frame rate works; use SendVideoAt if the capture time is known.
+// rtp.AccessUnitSplitter cuts an encoder's byte stream into access units.
 //
 // NOT VALIDATED: the video send media path is unproven.
-func (c *Call) SendVideo(accessUnit []byte) error { return c.eng.sendVideoFrame(c.id, accessUnit) }
+func (c *Call) SendVideo(accessUnit []byte) error { return c.eng.sendVideoFrame(c.id, accessUnit, -1) }
+
+// SendVideoAt is SendVideo with an explicit presentation time (for example frame index
+// divided by frame rate), which keeps the peer's playback free of the jitter of a pipe.
+// pts must not be negative and should not run backwards.
+//
+// NOT VALIDATED: the video send media path is unproven.
+func (c *Call) SendVideoAt(accessUnit []byte, pts time.Duration) error {
+	return c.eng.sendVideoFrame(c.id, accessUnit, max(pts, 0))
+}
 
 // OnReady registers a callback fired once media is flowing (relay bound, first frames
 // exchanged).

@@ -494,8 +494,34 @@ func callVideoSink(call *Call) VideoSink {
 	return call.videoSinkRef()
 }
 
-// videoRtpStepSamples advances the 90 kHz video RTP timestamp one frame at 15 fps.
-const videoRtpStepSamples = 90000 / 15
+// videoClockRate is the RTP clock rate of H.264 (RFC 6184).
+const videoClockRate = 90000
+
+// videoClock turns the moment a picture is sent (or its presentation time, if the
+// caller knows it) into a 90 kHz RTP timestamp. The sender used to add a fixed 1/15 s
+// per picture, which is only right for a 15 fps source that never drops a frame: a
+// 30 fps encoder made the peer's clock run at half speed. Timestamps always advance,
+// so a late or repeated time never moves the clock backwards.
+type videoClock struct {
+	started bool
+	origin  time.Duration
+	ts      uint32
+}
+
+// stamp returns the RTP timestamp for a picture at time at (any monotonic time base).
+func (c *videoClock) stamp(at time.Duration) uint32 {
+	if !c.started {
+		c.started, c.origin = true, at
+		return c.ts
+	}
+	ticks := (int64(at-c.origin)*videoClockRate + int64(time.Second)/2) / int64(time.Second)
+	next := uint32(ticks)
+	if ticks <= int64(c.ts) && int64(c.ts)-ticks < 1<<31 {
+		next = c.ts + 1
+	}
+	c.ts = next
+	return next
+}
 
 // videoSender packetizes encoded H.264 access units (Annex-B) into PT-97 RTP, E2E-SRTP
 // protects them with the video pipeline, and sends them to the relay. The send path is
@@ -505,18 +531,19 @@ const videoRtpStepSamples = 90000 / 15
 //
 // NOT VALIDATED: the video send media path is unproven.
 type videoSender struct {
-	mu      sync.Mutex
-	pipe    *MediaPipeline
-	ch      *relay.RelayMediaChannel
-	ssrc    uint32
-	seq     uint16
-	ts      uint32
-	started bool
+	mu    sync.Mutex
+	pipe  *MediaPipeline
+	ch    *relay.RelayMediaChannel
+	ssrc  uint32
+	seq   uint16
+	clock videoClock
+	epoch time.Time
 }
 
 // send fragments one Annex-B access unit into PT-97 RTP packets (marker on the last) and
-// sends them to the relay.
-func (vs *videoSender) send(au []byte) {
+// sends them to the relay. pts is the picture's presentation time on the caller's clock;
+// a negative pts means "now".
+func (vs *videoSender) send(au []byte, pts time.Duration) {
 	if vs == nil || len(au) == 0 {
 		return
 	}
@@ -533,15 +560,18 @@ func (vs *videoSender) send(au []byte) {
 	if vs.ch == nil {
 		return
 	}
-	if vs.started {
-		vs.ts += videoRtpStepSamples
+	if pts < 0 {
+		if vs.epoch.IsZero() {
+			vs.epoch = time.Now()
+		}
+		pts = time.Since(vs.epoch)
 	}
-	vs.started = true
+	ts := vs.clock.stamp(pts)
 	for i, p := range payloads {
 		hdr := rtp.RtpHeader{
 			PayloadType:    rtp.RtpPayloadTypeH264,
 			SequenceNumber: vs.seq,
-			Timestamp:      vs.ts,
+			Timestamp:      ts,
 			Ssrc:           vs.ssrc,
 			Marker:         i == len(payloads)-1,
 		}

@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/rotsch-repos/agentcaller/signaling"
@@ -125,7 +126,7 @@ func (e *engine) lookup(callID string) *engineCall {
 
 // sendVideoFrame packetizes one encoded H.264 access unit and sends it to the relay, if a
 // video send pipeline is live for the call.
-func (e *engine) sendVideoFrame(callID string, au []byte) error {
+func (e *engine) sendVideoFrame(callID string, au []byte, pts time.Duration) error {
 	e.mu.Lock()
 	var vs *videoSender
 	if m := e.calls[callID]; m != nil {
@@ -135,7 +136,7 @@ func (e *engine) sendVideoFrame(callID string, au []byte) error {
 	if vs == nil {
 		return errors.New("agentcaller: call has no active video media")
 	}
-	vs.send(au)
+	vs.send(au, pts)
 	return nil
 }
 
