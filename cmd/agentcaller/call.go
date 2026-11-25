@@ -10,6 +10,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -44,6 +45,30 @@ type callConfig struct {
 	videoIn       string
 	videoOut      string
 	videoFPS      float64
+	announce      string // text message sent to the target just before the call
+}
+
+// announceLead is how long the message has to show up on the phone before it rings.
+const announceLead = 2 * time.Second
+
+// announceCall tells the target by text who is about to call. A message that cannot be
+// sent is reported and does not stop the call.
+func announceCall(ctx context.Context, cfg callConfig, events *eventLog, send func(context.Context, string, string) error, lead time.Duration) {
+	if cfg.announce == "" {
+		return
+	}
+	sendCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	err := send(sendCtx, cfg.target, cfg.announce)
+	cancel()
+	if err != nil {
+		events.emit("announce_error", map[string]any{"error": err.Error()})
+		return
+	}
+	events.emit("announced", map[string]any{"text": cfg.announce})
+	select {
+	case <-time.After(lead):
+	case <-ctx.Done():
+	}
 }
 
 func parseCallArgs(args []string, stderr io.Writer) (callConfig, error) {
@@ -59,6 +84,7 @@ func parseCallArgs(args []string, stderr io.Writer) (callConfig, error) {
 	flags.StringVar(&cfg.inPath, "in", "-", "audio to send: raw s16le mono PCM from this file or FIFO; - is stdin, none sends silence")
 	flags.StringVar(&cfg.outPath, "out", "-", "received audio: raw s16le mono 16 kHz PCM to this file or FIFO; - is stdout, none discards")
 	flags.StringVar(&cfg.eventsPath, "events", "", "write JSON-line events here (default stderr)")
+	flags.StringVar(&cfg.announce, "announce", "", "send the target this text message two seconds before calling (the ringing screen only shows the account)")
 	flags.StringVar(&cfg.controlPath, "control", "", "read commands from this file or FIFO, one per line: flush, hangup, stats")
 	flags.IntVar(&cfg.inRate, "in-rate", agentcaller.SampleRate, "sample rate of -in in Hz (resampled to 16 kHz)")
 	flags.DurationVar(&cfg.maxBuffer, "max-buffer", 0, "bound the queued outgoing audio, dropping the oldest (for a live microphone); 0 queues everything (for speech synthesis)")
@@ -85,6 +111,8 @@ func parseCallArgs(args []string, stderr io.Writer) (callConfig, error) {
 	}
 	cfg.target = flags.Arg(0)
 	switch {
+	case cfg.answer && cfg.announce != "":
+		return cfg, errors.New("-announce is for calls that are placed, not with -answer")
 	case cfg.answerTimeout < 0 || cfg.maxDuration < 0 || cfg.maxBuffer < 0 || cfg.endSilence <= 0:
 		return cfg, errors.New("durations must be non-negative (-end-silence positive)")
 	case cfg.inRate < 4000 || cfg.inRate > 192000:
@@ -291,7 +319,23 @@ type duplex struct {
 	out    *pcmPipe // nil: received audio is only analysed
 	gate   *speechGate
 	ready  chan struct{} // closed when media flows
+
+	// The received audio as one timeline of 60 ms frames that keeps up with the clock.
+	// The network delivers it in other shapes: frames of 10 to 120 ms, several in one
+	// packet, and few or none while the peer's side is silent.
+	rxMu      sync.Mutex
+	rxPend    []float32 // received, not yet a whole frame
+	rxStart   time.Time // arrival of the first audio
+	rxSamples uint64    // length of the timeline so far
+	rxAudio   uint64    // of which received
+	rxFill    uint64    // of which silence for gaps without packets
+	rxSizes   map[int]int
 }
+
+// rxSlack is how far the received audio may fall behind the clock before the timeline
+// is continued with silence: more than the network's jitter, less than what would
+// delay noticing that the peer has stopped talking.
+const rxSlack = 180 * time.Millisecond
 
 func newDuplex(cfg callConfig, events *eventLog, out io.Writer) *duplex {
 	d := &duplex{
@@ -307,8 +351,55 @@ func newDuplex(cfg callConfig, events *eventLog, out io.Writer) *duplex {
 	return d
 }
 
-// WriteFrame receives the peer's audio from the media loop.
+// WriteFrame receives the peer's audio from the media loop: whatever one packet held.
 func (d *duplex) WriteFrame(frame []float32) error {
+	now := time.Now()
+	d.rxMu.Lock()
+	defer d.rxMu.Unlock()
+	if d.rxStart.IsZero() {
+		d.rxStart = now
+		d.rxSizes = map[int]int{}
+	}
+	d.rxAudio += uint64(len(frame))
+	if len(d.rxSizes) < 16 || d.rxSizes[len(frame)] > 0 {
+		d.rxSizes[len(frame)]++
+	}
+	d.rxPend = append(d.rxPend, frame...)
+	for len(d.rxPend) >= agentcaller.FrameSamples {
+		d.take(d.rxPend[:agentcaller.FrameSamples])
+		d.rxPend = d.rxPend[agentcaller.FrameSamples:]
+	}
+	return nil
+}
+
+// fillGap continues the timeline with silence where the stream has fallen behind the
+// clock. Without it a pause is as long as the packets that happen to arrive in it, and
+// may only be noticed once the peer talks again.
+func (d *duplex) fillGap(now time.Time) {
+	d.rxMu.Lock()
+	defer d.rxMu.Unlock()
+	if d.rxStart.IsZero() || now.Sub(d.rxStart) <= rxSlack {
+		return
+	}
+	target := uint64((now.Sub(d.rxStart) - rxSlack) * agentcaller.SampleRate / time.Second)
+	if d.rxSamples+uint64(len(d.rxPend))+agentcaller.FrameSamples > target {
+		return
+	}
+	silence := make([]float32, agentcaller.FrameSamples)
+	if n := len(d.rxPend); n > 0 { // finish the frame that was begun
+		d.rxFill += uint64(agentcaller.FrameSamples - n)
+		d.take(append(append(make([]float32, 0, agentcaller.FrameSamples), d.rxPend...), silence[n:]...))
+		d.rxPend = d.rxPend[:0]
+	}
+	for d.rxSamples < target {
+		d.rxFill += agentcaller.FrameSamples
+		d.take(silence)
+	}
+}
+
+// take puts one 60 ms frame on the timeline. Callers hold rxMu.
+func (d *duplex) take(frame []float32) {
+	d.rxSamples += uint64(len(frame))
 	if d.out != nil {
 		d.out.write(frame)
 	}
@@ -324,7 +415,6 @@ func (d *duplex) WriteFrame(frame []float32) error {
 	case ended:
 		d.events.emit("speech_end", map[string]any{"at": at.Seconds(), "duration": length.Seconds()})
 	}
-	return nil
 }
 
 // Close implements agentcaller.AudioSink.
@@ -402,6 +492,14 @@ func (d *duplex) stats(call duplexCall) map[string]any {
 	if d.out != nil {
 		out["out_dropped_frames"] = d.out.dropped.Load()
 	}
+	d.rxMu.Lock()
+	out["rx_audio_ms"], out["rx_gap_fill_ms"] = ms(d.rxAudio), ms(d.rxFill)
+	sizes := map[string]int{} // samples per delivered packet → how often
+	for n, count := range d.rxSizes {
+		sizes[strconv.Itoa(n)] = count
+	}
+	out["rx_packet_samples"] = sizes
+	d.rxMu.Unlock()
 	return out
 }
 
@@ -473,8 +571,12 @@ func (d *duplex) run(ctx context.Context, call duplexCall, in io.Reader, control
 	if durTimer != nil {
 		defer durTimer.Stop()
 	}
+	gaps := time.NewTicker(60 * time.Millisecond)
+	defer gaps.Stop()
 	for {
 		select {
+		case now := <-gaps.C:
+			d.fillGap(now)
 		case reason := <-ended:
 			return finish(reason, nil)
 		case err := <-inputDone:
@@ -625,7 +727,27 @@ func runCall(ctx context.Context, cfg callConfig, stderr io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("open -out: %w", err)
 	}
+	in := inputReader(cfg.inPath)
+	if in == nil && cfg.hangupOnEOF {
+		return errors.New("-hangup-on-eof needs an -in stream, and stdin is a terminal")
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var outW io.Writer
+	if out != nil {
+		outW = out
+	}
+	var control <-chan string
+	if cfg.controlPath != "" {
+		control = controlLines(ctx, cfg.controlPath)
+	}
+	return placeCall(ctx, cfg, events, stderr, func(call *agentcaller.Call) error {
+		return newDuplex(cfg, events, outW).runWithVideo(ctx, call, in, control)
+	})
+}
 
+// placeCall connects, places or answers the call described by cfg and hands it to run.
+func placeCall(ctx context.Context, cfg callConfig, events *eventLog, stderr io.Writer, run func(*agentcaller.Call) error) error {
 	log := zerolog.Ctx(ctx)
 	session, err := openSession(ctx, cfg.storePath, *log)
 	if err != nil {
@@ -651,27 +773,23 @@ func runCall(ctx context.Context, cfg callConfig, stderr io.Writer) error {
 	if cfg.answer {
 		call, err = awaitCaller(ctx, client, cfg, incoming, events)
 	} else {
+		announceCall(ctx, cfg, events, client.SendText, announceLead)
 		events.emit("calling", map[string]any{"target": cfg.target})
 		call, err = client.Call(ctx, cfg.target)
 	}
 	if err != nil {
 		return err
 	}
+	return run(call)
+}
 
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	var outW io.Writer
-	if out != nil {
-		outW = out
-	}
-	d := newDuplex(cfg, events, outW)
-	var control <-chan string
-	if cfg.controlPath != "" {
-		control = controlLines(ctx, cfg.controlPath)
-	}
+// runWithVideo is run plus the optional video streams of the call command.
+func (d *duplex) runWithVideo(ctx context.Context, call *agentcaller.Call, in io.Reader, control <-chan string) error {
+	cfg, events := d.cfg, d.events
 	if cfg.videoOut != "" {
 		rec, err := agentcaller.AnnexBRecorder(cfg.videoOut)
 		if err != nil {
+			_ = call.Hangup()
 			return fmt.Errorf("open -video-out: %w", err)
 		}
 		defer rec.Close()
@@ -685,11 +803,6 @@ func runCall(ctx context.Context, cfg callConfig, stderr io.Writer) error {
 			return call.SendVideo(au)
 		}
 		go pumpVideo(ctx, send, v, cfg.videoFPS, d.ready, events)
-	}
-	in := inputReader(cfg.inPath)
-	if in == nil && cfg.hangupOnEOF {
-		_ = call.Hangup()
-		return errors.New("-hangup-on-eof needs an -in stream, and stdin is a terminal")
 	}
 	return d.run(ctx, call, in, control)
 }

@@ -25,6 +25,7 @@ around the codec so that a call feels immediate. See [Credits](#credits).
 | Outbound audio call, send only (`notify`) | live-tested as `meowcaller notify`; not re-run since the fork (the encoder output is bit-identical) |
 | One question, one answer (`talk`) | built and replay-tested; no live call yet |
 | Two-way pipe (`call`), speech events, barge-in | tested offline against a simulated call; **no live call yet** |
+| Spoken conversation (`converse`): recognition, chat model, speech command | tested offline, and end to end with `-simulate` against real services. **One live call so far, and it failed** after the first answer (see the changelog); the fixes for it are not yet confirmed on a call |
 | New receive path (ordering, loss handling) | tested offline with simulated loss and reordering; **not yet on real traffic** |
 | Video send and receive | tested offline against ffmpeg; **never validated in a live call**, as upstream |
 
@@ -69,6 +70,36 @@ Events, one JSON object per line (`t` is seconds since the command started):
 `agentcaller call -answer +41790000000` waits for a call from that number and
 answers it; calls from anyone else are left ringing on the phone. All flags:
 `agentcaller call -h`, and [cmd/agentcaller/README.md](cmd/agentcaller/README.md).
+
+### The loop, built in: `converse`
+
+`agentcaller converse` is that loop in one process. It needs three things you run
+yourself: a transcription endpoint and a chat endpoint that speak the OpenAI HTTP
+protocol (for example faster-whisper behind a small server, and vLLM or llama.cpp), and
+any command that reads text on stdin and writes raw PCM to stdout.
+
+```sh
+agentcaller converse \
+  -persona persona.md -greeting "Hallo, ich bins." \
+  -stt-url http://127.0.0.1:8000 -llm-url http://127.0.0.1:8002 -llm-model qwen3.8-27b \
+  -tts-cmd "piper --model de_DE-thorsten-medium.onnx --output-raw" -tts-rate 22050 \
+  +41790000000
+```
+
+The answer is spoken sentence by sentence while the model is still writing, the agent
+stops when the person starts to talk, a pause that turns out not to be the end is
+merged with what follows, and a goodbye ends the call. To hear the whole chain without
+a phone, let a recording play the caller:
+
+```sh
+agentcaller converse -simulate caller.wav -record agent.wav -tts-cmd "..." -events events.jsonl
+```
+
+Measured that way on one machine (Whisper large-v3 and a 27B model on local GPUs), two
+runs of three turns each: the first sound of the answer left 0.9 s after the pause was
+reported in four turns and 1.4 and 1.9 s in the two where the recogniser was slow. The
+pause itself (`-end-silence`, 700 ms by default) comes on top. These are numbers from
+the simulation, not from a call.
 
 ## What "instant" means here
 

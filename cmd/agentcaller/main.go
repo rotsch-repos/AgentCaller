@@ -58,6 +58,12 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 			return err
 		}
 		return runCall(ctx, cfg, stderr)
+	case "converse":
+		cfg, err := parseConverseArgs(args[1:], stderr)
+		if err != nil {
+			return err
+		}
+		return runConverse(ctx, cfg, stderr)
 	case "talk":
 		cfg, err := parseTalkArgs(args[1:], stderr)
 		if err != nil {
@@ -94,6 +100,9 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  agentcaller notify [flags] <target> <audio.mp3|wav|ogg|opus|mulaw|ulaw|->")
 	fmt.Fprintln(w, "  agentcaller call [flags] <target>           (two-way call: PCM in, PCM out, JSON events)")
 	fmt.Fprintln(w, "  agentcaller call -answer [flags] <caller|any>")
+	fmt.Fprintln(w, "  agentcaller converse [flags] <target>       (spoken conversation: speech recognition, chat model, speech command)")
+	fmt.Fprintln(w, "  agentcaller converse -answer [flags] <caller|any>")
+	fmt.Fprintln(w, "  agentcaller converse -simulate peer.wav [flags]")
 	fmt.Fprintln(w, "  agentcaller talk [flags] <target>           (live VAD→STT→LLM→TTS call)")
 	fmt.Fprintln(w, "  agentcaller talk -dry-run [flags] <input.wav>")
 	fmt.Fprintln(w, "  agentcaller talk -replay [flags] -replay <input.wav> [--listen-only] (VAD-Replay)")

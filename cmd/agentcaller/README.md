@@ -91,3 +91,50 @@ rejected: a reject from a linked device declines the call on the phone too.
 Audio that arrives on `-in` before the call is answered is not read, so nothing stale is
 spoken. If the reader of `-out` falls more than three seconds behind, frames are dropped
 and counted in `stats.out_dropped_frames`; the call itself is never held up.
+
+## converse: a spoken conversation
+
+```text
+agentcaller converse [flags] <target>
+agentcaller converse -answer [flags] <caller|any>
+agentcaller converse -simulate peer.wav [-record agent.wav] [flags]
+```
+
+`converse` runs the `call` duplex in-process and drives it:
+
+1. `speech_end` names a stretch of the peer's audio; it is cut out (with 240 ms before and
+   300 ms after) and posted as a WAV to `<-stt-url>/v1/audio/transcriptions` (`file`, `model`,
+   `language`; the answer is `{"text": ...}`).
+2. The conversation so far goes to `<-llm-url>/v1/chat/completions` with `stream: true`. The
+   system prompt is the `-persona` file followed by fixed telephone rules (short spoken
+   sentences, no markup). `chat_template_kwargs.enable_thinking` is sent as `false`.
+3. Each complete sentence is handed to `-tts-cmd` (run by `sh -c`): text on stdin, raw s16le
+   mono PCM at `-tts-rate` on stdout. The audio is passed into the call as it arrives, at
+   most 600 ms ahead of real time.
+
+Turn taking:
+
+- The peer starts to talk while the agent speaks or thinks: the turn is cancelled, the speech
+  command is killed and queued audio is flushed. Only sentences that went out in full are
+  kept as the agent's side of the history. `-no-barge-in` lets the agent finish instead.
+- The peer goes on after a pause before the agent has said anything: both parts are answered
+  as one.
+- What the recogniser returns for noise (empty text, the usual Whisper subtitle credits) is
+  ignored.
+- A goodbye at the end of what the peer said (tschüss, bis bald, bye, ...) is answered once,
+  then the agent hangs up. `-max-duration` (default 15 min) ends a call that does not.
+
+Additional events: `heard {text, at, stt_ms}`, `reply {text, interrupted, first_audio_ms}`
+(`first_audio_ms` counts from the `speech_end` event to the first audio written into the
+call), `stt_error`, `reply_error`.
+
+`-simulate peer.wav` replaces the WhatsApp call with a recording that plays in real time as
+the peer and, like a polite caller, waits at each of its pauses (0.9 s or longer) until the
+agent has answered. Everything else is the real chain, so it measures the real answer delay
+and `-record` gives you the agent's side to listen to. It does not exercise the network path,
+the codec, or echo: on a real call the agent's own voice coming back through the peer's
+loudspeaker may trigger barge-in. That has not been tried yet; `-no-barge-in` is the way out.
+
+Flags: `-store`, `-answer`, `-answer-timeout`, `-max-duration`, `-end-silence`, `-events`,
+`-persona FILE`, `-greeting TEXT`, `-llm-url`, `-llm-model`, `-max-tokens`, `-stt-url`,
+`-stt-model`, `-stt-language`, `-tts-cmd`, `-tts-rate`, `-no-barge-in`, `-simulate`, `-record`.

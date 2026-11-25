@@ -2,12 +2,17 @@ package agentcaller
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/rotsch-repos/agentcaller/diag"
 	"github.com/rs/zerolog"
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
+	"google.golang.org/protobuf/proto"
 )
 
 // Client is the managed entry point to the WhatsApp 1:1 calling stack. It wraps a
@@ -44,6 +49,22 @@ func NewClient(wa *whatsmeow.Client, opts ...Option) *Client {
 // endpoint arrives.
 func (c *Client) Call(ctx context.Context, target string) (*Call, error) {
 	return c.eng.placeCall(ctx, target)
+}
+
+// SendText sends target a plain text message from the linked account, for instance to
+// say who is about to call: the ringing screen only shows the account.
+func (c *Client) SendText(ctx context.Context, target, text string) error {
+	if strings.TrimSpace(text) == "" {
+		return errors.New("empty message")
+	}
+	jid, err := parseCallTarget(target)
+	if err != nil {
+		return err
+	}
+	if _, err := c.wa.SendMessage(ctx, jid, &waE2E.Message{Conversation: proto.String(text)}); err != nil {
+		return fmt.Errorf("send message to %s: %w", jid.User, err)
+	}
+	return nil
 }
 
 // ResolvePeer maps a call target (a phone number, a phone JID, or an @lid JID) to the LID
