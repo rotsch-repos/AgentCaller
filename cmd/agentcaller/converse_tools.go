@@ -56,6 +56,11 @@ const (
 		"sag das deinem Gegenüber und warte auf ein Ergebnis."
 	jobDone = "(Meldung des Systems, nicht von deinem Gegenüber gesprochen: Der Auftrag %s %s von vorhin ist fertig. Ergebnis:\n%s\n" +
 		"Sag deinem Gegenüber jetzt in zwei bis vier Sätzen das Wesentliche davon, in eigenen Worten; Einzelheiten erst, wenn es nachfragt.)"
+	// reportOwed goes along with the next thing the agent says while an outcome that is
+	// in the conversation has not reached the peer: the peer talked over the report.
+	reportOwed = "(Meldung des Systems, nicht von deinem Gegenüber gesprochen: Weiter oben steht das Ergebnis zu %s. " +
+		"Du hast es deinem Gegenüber noch nicht gesagt. Geh zuerst kurz auf das eben Gesagte ein und berichte dann das Wesentliche " +
+		"davon in zwei bis vier Sätzen. Nur wenn du es inzwischen doch schon gesagt hast, lass es weg.)"
 	// keepPromise goes to a model that announced a lookup or an errand and called no tool.
 	keepPromise = "(Meldung des Systems, nicht von deinem Gegenüber gesprochen: Du hast eben angekündigt, etwas nachzusehen, " +
 		"weiterzugeben oder zu erledigen, aber kein Werkzeug aufgerufen. Ruf jetzt das passende Werkzeug auf, ohne etwas dazu zu sagen. " +

@@ -98,6 +98,8 @@ thrown away when they turn out to be nothing. `-greeting-delay 1500ms` waits for
 phone to reach the ear, and a greeting that a noise did cut off is said again. `-hangup`
 says when the agent ends the call: after a `goodbye` (default), only when `asked` to hang
 up, or `never`. A noise once came out of the recogniser as "Bye." and ended a call.
+The outcome of a background errand is owed until it has been spoken: if the person talks
+over the report, it goes along with the next answer.
 
 
 ```sh

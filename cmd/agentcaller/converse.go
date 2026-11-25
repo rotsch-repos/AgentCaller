@@ -452,6 +452,7 @@ type conversation struct {
 	pending    []string // heard but not answered yet
 	jobs       int      // background work under way
 	greetOwed  bool     // the greeting is due and has not been said to the end
+	unsaid     []string // background work whose outcome is in the history but was not spoken
 	life       context.Context
 }
 
@@ -688,12 +689,19 @@ func (c *conversation) report(ctx context.Context, s segment) {
 	if r.err != nil {
 		note = fmt.Sprintf(jobFailed, r.call.Function.Name, r.call.Function.Arguments, r.err)
 	}
-	// The outcome is part of the conversation from here on, whether or not the agent gets
-	// to say it now: if the peer cuts in, the next answer still knows it.
+	// The outcome is part of the conversation from here on, and it is owed to the peer
+	// until it has been spoken: if the peer cuts in before the report is out, it goes
+	// along with the next answer (see owedNote). On a real call 4 s to first audio were
+	// enough for the peer to talk over most reports, and those outcomes were never said.
 	c.mu.Lock()
+	owed, before := c.owedNote()
 	c.history = append(c.history, chatMessage{Role: "user", Content: note})
+	c.unsaid = append(c.unsaid, r.call.Function.Name+" "+clip(r.call.Function.Arguments, 160))
 	msgs := append([]chatMessage{{Role: "system", Content: c.cfg.llm.Prompt}}, c.history...)
 	c.mu.Unlock()
+	if owed != "" {
+		msgs = append(msgs, chatMessage{Role: "user", Content: owed})
+	}
 
 	turn, end, ok := c.beginTurn(ctx, false)
 	if !ok {
@@ -708,6 +716,7 @@ func (c *conversation) report(ctx context.Context, s segment) {
 	if len(spoken) == 0 {
 		return
 	}
+	c.said(before + 1)
 	reply := strings.Join(spoken, " ")
 	c.remember("", looked, reply)
 	fields := map[string]any{"text": reply, "interrupted": interrupted, "report": true}
@@ -715,6 +724,22 @@ func (c *conversation) report(ctx context.Context, s segment) {
 		fields["first_audio_ms"] = first.Sub(s.ended).Milliseconds() // since the work came back
 	}
 	c.events.emit("reply", fields)
+}
+
+// owedNote is the reminder of outcomes that are in the history and were not spoken, and
+// how many it covers. The caller holds c.mu.
+func (c *conversation) owedNote() (note string, n int) {
+	if len(c.unsaid) == 0 {
+		return "", 0
+	}
+	return fmt.Sprintf(reportOwed, strings.Join(c.unsaid, " und zu ")), len(c.unsaid)
+}
+
+// said strikes the n oldest outcomes off the list of those still owed to the peer.
+func (c *conversation) said(n int) {
+	c.mu.Lock()
+	c.unsaid = c.unsaid[min(n, len(c.unsaid)):]
+	c.mu.Unlock()
 }
 
 // maxHistory is how many messages of the conversation the model is shown again.
@@ -781,12 +806,16 @@ func (c *conversation) answer(ctx context.Context, s segment) {
 	}
 	user := strings.Join(c.pending, " ")
 	msgs := append([]chatMessage{{Role: "system", Content: c.cfg.llm.Prompt}}, c.history...)
+	owed, owedN := c.owedNote()
 	c.mu.Unlock()
 	asked := user
 	if c.cfg.clock != nil {
 		// With the question, not in the system prompt: what the model has already read
 		// stays the same from turn to turn, and the server need not read it again.
 		asked = "(" + spokenNow(c.cfg.clock()) + " Das ist eine Angabe des Systems, dein Gegenüber hat sie nicht gesagt.)\n\n" + user
+	}
+	if owed != "" {
+		asked += "\n\n" + owed
 	}
 	msgs = append(msgs, chatMessage{Role: "user", Content: asked})
 
@@ -816,6 +845,10 @@ func (c *conversation) answer(ctx context.Context, s segment) {
 	fields := map[string]any{"text": reply, "interrupted": interrupted}
 	if len(looked) > 0 {
 		fields["looked_up"] = true
+	}
+	if owedN > 0 && !interrupted {
+		c.said(owedN)
+		fields["reports"] = owedN // outcomes of background work that went along with this answer
 	}
 	if !first.IsZero() {
 		fields["first_audio_ms"] = first.Sub(s.ended).Milliseconds()

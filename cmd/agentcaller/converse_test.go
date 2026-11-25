@@ -160,7 +160,8 @@ type fakeChain struct {
 	transcripts    []string
 	replies        [][]string
 	sentenceFrames int
-	stall          bool             // the first answer never comes: think waits for its turn to be cancelled
+	stall          bool             // one answer never comes: think waits for its turn to be cancelled
+	stallAt        int              // which one, counting from zero
 	jobs           map[int]toolCall // question number -> background work the model asks for
 
 	heardBytes []int
@@ -189,7 +190,7 @@ func (f *fakeChain) chain() voiceChain {
 			if n < len(f.replies) {
 				reply = f.replies[n]
 			}
-			stall := f.stall && n == 0
+			stall := f.stall && n == f.stallAt
 			job, hasJob := f.jobs[n]
 			f.mu.Unlock()
 			if hasJob {
@@ -716,5 +717,54 @@ func TestConversationHangupAsked(t *testing.T) {
 		if (converseConfig{hangup: "never"}).hangsUp(said) {
 			t.Errorf("never: %q hangs up", said)
 		}
+	}
+}
+
+// The peer talks over the report before a word of it is out. The outcome is not lost:
+// it goes along with the next answer, and only once.
+func TestConversationOwesAReportThatWasTalkedOver(t *testing.T) {
+	var job toolCall
+	job.ID, job.Function.Name, job.Function.Arguments = "c1", "auftrag", `{"was":"nachsehen"}`
+	chain := &fakeChain{
+		transcripts:    []string{"Schau das bitte nach.", "Und sonst so?", "Danke."},
+		replies:        [][]string{{"Ich kümmere mich darum."}, nil, {"Gut. Es ist übrigens erledigt."}, {"Gern."}},
+		sentenceFrames: 5,
+		jobs:           map[int]toolCall{0: job},
+		stall:          true,
+		stallAt:        1, // the report: the model is still thinking when the peer speaks
+	}
+	cfg := converseConfig{llm: LLMConfig{Prompt: "PERSONA"}, tools: []callTool{{
+		Name: "auftrag", Description: "d", Background: true, Timeout: 5, Command: "sleep 0.2; cat; echo ' -> gefunden'",
+	}}}
+	l := startLine(t, cfg, chain.chain())
+	l.peerSays(15)
+	l.await("reply", 1)
+	l.await("lookup_done", 1)
+	for len(chain.questions()) < 2 { // the report is being thought about
+		time.Sleep(time.Millisecond)
+	}
+	l.peerSays(12)
+	if e := l.await("reply", 2); e["text"] != "Gut. Es ist übrigens erledigt." || e["reports"] != float64(1) || e["report"] != nil {
+		t.Fatalf("the answer after the lost report: %v", e)
+	}
+	l.awaitSent(10)
+	l.peerSays(12)
+	if e := l.await("reply", 3); e["text"] != "Gern." || e["reports"] != nil {
+		t.Fatalf("third reply: %v", e)
+	}
+	asked := chain.questions()
+	if len(asked) != 4 {
+		t.Fatalf("%d questions to the model", len(asked))
+	}
+	second := contents(asked[2])
+	if last := second[len(second)-1]; !strings.HasPrefix(last, "user: Und sonst so?") || !strings.Contains(last, "noch nicht gesagt") || !strings.Contains(last, `auftrag {"was":"nachsehen"}`) {
+		t.Fatalf("the model was not reminded of the outcome: %q", last)
+	}
+	if !strings.Contains(strings.Join(second, "\n"), `{"was":"nachsehen"} -> gefunden`) {
+		t.Fatalf("the outcome is not in the conversation: %q", second)
+	}
+	third := contents(asked[3])
+	if last := third[len(third)-1]; last != "user: Danke." {
+		t.Fatalf("reminded again: %q", last)
 	}
 }

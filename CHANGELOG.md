@@ -96,6 +96,15 @@ All notable changes to AgentCaller (meowcaller before the fork), tracked per mod
     ear: `-greeting-delay`. (3) A 300 ms noise was transcribed as "Bye." and the agent
     hung up: `-hangup goodbye|asked|never`. Also seen: an errand's command is killed with
     the call, so a tool that must finish its work has to detach itself.
+  - **Sixth live call (2026-11-26): 17 minutes, nine errands, no answer cut off by a
+    noise** (three noises, all ignored without stopping the agent). One fault: of eight
+    outcomes that came back during the call only one was reported as such, three reached
+    the peer with a later answer and the rest were never said. The model was busy (first
+    audio 4.6 s in the median), so the peer spoke again before the report was out, the
+    report turn was cancelled, and the next answer dealt only with what had just been
+    said (0 of 5 in a replay of that moment). An outcome is now owed until it has been
+    spoken: it goes along with the next answer as a reminder (8 of 8 in the same replay),
+    event `reply` carries `reports`.
   - **Phone rules rewritten.** The first version asked for one or two short sentences
     and for saying what the agent cannot do; on the call that came out as clipped
     answers and repeated disclaimers. The rules now ask for whole sentences, two to
