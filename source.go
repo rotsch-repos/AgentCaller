@@ -10,6 +10,8 @@ import (
 	gomp3 "github.com/hajimehoshi/go-mp3"
 	"github.com/pion/opus"
 	"github.com/pion/opus/pkg/oggreader"
+
+	"github.com/rotsch-repos/agentcaller/resample"
 )
 
 // frameSource turns a stream of decoded 16 kHz mono float32 samples (pushed in
@@ -59,66 +61,37 @@ func (f *frameSource) Close() error {
 	return err
 }
 
-// downmixResampler converts interleaved PCM at an arbitrary sample rate and channel
-// count into 16 kHz mono float32, downmixing channels by averaging and resampling by
-// linear interpolation. It is stateful across chunks so streaming decoders can feed it
-// a frame at a time without gaps at chunk boundaries.
-type downmixResampler struct {
-	inRate   int
-	channels int
-	// pos is the fractional read position (in input mono samples) for the next output
-	// sample, carried across pushes.
-	pos      float64
-	last     float32 // last input mono sample of the previous chunk (for interpolation across boundaries)
-	havePrev bool
-}
-
-func newDownmixResampler(inRate, channels int) *downmixResampler {
-	return &downmixResampler{inRate: inRate, channels: channels}
-}
-
-// process consumes one chunk of interleaved s16/float input (already downmixed to mono
-// float32 here via the caller's mono slice) and returns the 16 kHz mono samples it
-// yields. The caller passes the chunk already collapsed to mono.
-func (d *downmixResampler) process(mono []float32) []float32 {
-	if len(mono) == 0 {
-		return nil
-	}
-	if d.inRate == SampleRate {
-		return mono
-	}
-	step := float64(d.inRate) / float64(SampleRate)
-	// Build a working buffer that includes the carried-over last sample at index -1 so
-	// interpolation is continuous across chunk boundaries.
-	var src []float32
-	base := 0.0
-	if d.havePrev {
-		src = make([]float32, 0, len(mono)+1)
-		src = append(src, d.last)
-		src = append(src, mono...)
-		base = 1.0 // input index 0 of this chunk sits at src index 1
-	} else {
-		src = mono
-	}
-	var out []float32
-	for {
-		idx := d.pos + base
-		i := int(idx)
-		if i+1 >= len(src) {
-			break
+// resampledPCM returns a frameSource feeder that reads interleaved s16le PCM from r,
+// averages the channels to mono and converts it to 16 kHz with a band-limited
+// resampler (package resample), draining the filter at the end of the stream.
+func resampledPCM(fs *frameSource, r io.Reader, rate, channels int) func() (bool, error) {
+	res := resample.New(rate, SampleRate)
+	buf := make([]byte, 8192-8192%(channels*2))
+	finished := false
+	finish := func() {
+		if !finished {
+			finished = true
+			fs.push(res.Flush(nil))
 		}
-		frac := idx - float64(i)
-		s := src[i]*(1-float32(frac)) + src[i+1]*float32(frac)
-		out = append(out, s)
-		d.pos += step
 	}
-	// Advance pos into the coordinate frame of the next chunk: subtract the number of
-	// whole input samples we have fully consumed from this chunk.
-	consumed := float64(len(mono))
-	d.pos -= consumed
-	d.last = mono[len(mono)-1]
-	d.havePrev = true
-	return out
+	return func() (bool, error) {
+		if finished {
+			return false, nil
+		}
+		n, err := io.ReadFull(r, buf)
+		if n == 0 && err != io.EOF {
+			return false, err
+		}
+		n -= n % (channels * 2) // whole sample groups only
+		if n > 0 {
+			fs.push(res.Process(wavMono(buf[:n], channels), nil))
+		}
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			finish()
+			return false, nil
+		}
+		return true, err
+	}
 }
 
 // WAVFile streams a RIFF/WAVE file as 16 kHz mono FrameSamples frames, downmixing and
@@ -133,32 +106,8 @@ func WAVFile(path string) (AudioSource, error) {
 		f.Close()
 		return nil, err
 	}
-	res := newDownmixResampler(wr.sampleRate, wr.channels)
-	buf := make([]byte, 8192)
 	fs := &frameSource{closer: f.Close}
-	fs.more = func() (bool, error) {
-		n, err := io.ReadFull(wr.r, buf)
-		if n == 0 {
-			if err == io.EOF {
-				return false, nil
-			}
-			return false, err
-		}
-		// Trim to a whole number of (channel-grouped) 16-bit samples.
-		frameBytes := wr.channels * 2
-		n -= n % frameBytes
-		if n == 0 {
-			return false, nil
-		}
-		mono := wavMono(buf[:n], wr.channels)
-		fs.push(res.process(mono))
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			// Drain any remaining decoded samples on the next iteration; signal that no
-			// further input remains after this push.
-			return len(fs.pending) >= FrameSamples, nil
-		}
-		return true, nil
-	}
+	fs.more = resampledPCM(fs, wr.r, wr.sampleRate, wr.channels)
 	return fs, nil
 }
 
@@ -268,28 +217,8 @@ func MP3File(path string) (AudioSource, error) {
 		return nil, err
 	}
 	// go-mp3 always emits 16-bit little-endian stereo (2 channels) at SampleRate().
-	res := newDownmixResampler(dec.SampleRate(), 2)
-	buf := make([]byte, 8192)
 	fs := &frameSource{closer: f.Close}
-	fs.more = func() (bool, error) {
-		n, err := io.ReadFull(dec, buf)
-		if n == 0 {
-			if err == io.EOF {
-				return false, nil
-			}
-			return false, err
-		}
-		n -= n % 4 // whole stereo s16 frames (2 channels * 2 bytes)
-		if n == 0 {
-			return false, nil
-		}
-		mono := wavMono(buf[:n], 2)
-		fs.push(res.process(mono))
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			return len(fs.pending) >= FrameSamples, nil
-		}
-		return true, nil
-	}
+	fs.more = resampledPCM(fs, dec, dec.SampleRate(), 2)
 	return fs, nil
 }
 
