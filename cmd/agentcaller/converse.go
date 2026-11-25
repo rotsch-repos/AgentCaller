@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -38,6 +39,7 @@ type converseConfig struct {
 	noBargeIn   bool
 	simulate    string // WAV file played as the peer instead of a real call
 	record      string // with simulate: WAV of what the agent said
+	recordHeard string // WAV of what the agent heard, as its timeline has it
 }
 
 // phoneRules is appended to every persona: the answer is heard, not read.
@@ -79,6 +81,7 @@ func parseConverseArgs(args []string, stderr io.Writer) (converseConfig, error) 
 	flags.BoolVar(&cfg.noBargeIn, "no-barge-in", false, "let the agent finish its answer even when the peer starts to talk")
 	flags.StringVar(&cfg.simulate, "simulate", "", "no call: play this WAV as the peer (it waits for the agent at each pause) and run the real chain")
 	flags.StringVar(&cfg.record, "record", "", "with -simulate: write what the agent said to this WAV")
+	flags.StringVar(&cfg.recordHeard, "record-heard", "", "write what the agent heard to this WAV when the call ends (a recording of the peer: for finding faults)")
 	flags.Usage = func() {
 		fmt.Fprintln(stderr, "usage: agentcaller converse [flags] <target>")
 		fmt.Fprintln(stderr, "       agentcaller converse -answer [flags] <caller|any>")
@@ -137,6 +140,18 @@ func runConverse(ctx context.Context, cfg converseConfig, stderr io.Writer) erro
 		speak: commandSpeaker(cfg.ttsCmd, cfg.call.inRate),
 	}
 	c := newConversation(cfg, chain, eventsOut)
+	if cfg.recordHeard != "" {
+		c.tape = &bytes.Buffer{}
+		defer func() {
+			c.heard.mu.Lock() // the tape is written under the log's lock
+			wav := wavBytes(c.tape.Bytes())
+			c.heard.mu.Unlock()
+			if err := os.WriteFile(cfg.recordHeard, wav, 0o600); err != nil {
+				fmt.Fprintln(stderr, "write -record-heard:", err)
+			}
+		}()
+		c.heard.tape = c.tape
+	}
 	if cfg.simulate != "" {
 		peer := readWAV16(cfg.simulate)
 		if len(peer) == 0 {
@@ -201,6 +216,7 @@ type audioLog struct {
 	mu   sync.Mutex
 	base int // bytes dropped from the front
 	buf  []byte
+	tape *bytes.Buffer // everything, if the call is recorded
 }
 
 const (
@@ -210,6 +226,9 @@ const (
 
 func (a *audioLog) Write(p []byte) (int, error) {
 	a.mu.Lock()
+	if a.tape != nil {
+		a.tape.Write(p)
+	}
 	a.buf = append(a.buf, p...)
 	if len(a.buf) > 2*audioLogKeep {
 		drop := len(a.buf) - audioLogKeep
@@ -324,6 +343,7 @@ type conversation struct {
 	events  *eventLog
 	tap     *eventTap
 	heard   *audioLog
+	tape    *bytes.Buffer
 	say     *pacedWriter
 	sayPipe *io.PipeReader
 	control chan string
@@ -501,12 +521,21 @@ func (c *conversation) answer(ctx context.Context, s segment) {
 	text = strings.TrimSpace(text)
 	if text == "" || isTranscriptionNoise(text) {
 		c.events.emit("heard", map[string]any{"text": "", "ignored": text, "at": s.at.Seconds()})
-		return
+		c.mu.Lock()
+		owed := len(c.pending) > 0
+		c.mu.Unlock()
+		if !owed {
+			return
+		}
+		text = "" // a noise cut off the answer to what was said before: it is still owed
+	} else {
+		c.events.emit("heard", map[string]any{"text": text, "at": s.at.Seconds(), "stt_ms": time.Since(sttStart).Milliseconds()})
 	}
-	c.events.emit("heard", map[string]any{"text": text, "at": s.at.Seconds(), "stt_ms": time.Since(sttStart).Milliseconds()})
 
 	c.mu.Lock()
-	c.pending = append(c.pending, text)
+	if text != "" {
+		c.pending = append(c.pending, text)
+	}
 	user := strings.Join(c.pending, " ")
 	msgs := append([]chatMessage{{Role: "system", Content: c.cfg.llm.Prompt}}, c.history...)
 	c.mu.Unlock()

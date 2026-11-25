@@ -25,7 +25,7 @@ around the codec so that a call feels immediate. See [Credits](#credits).
 | Outbound audio call, send only (`notify`) | live-tested as `meowcaller notify`; not re-run since the fork (the encoder output is bit-identical) |
 | One question, one answer (`talk`) | built and replay-tested; no live call yet |
 | Two-way pipe (`call`), speech events, barge-in | tested offline against a simulated call; **no live call yet** |
-| Spoken conversation (`converse`): recognition, chat model, speech command | tested offline, and end to end with `-simulate` against real services; **no live call yet** |
+| Spoken conversation (`converse`): recognition, chat model, speech command | tested offline, and end to end with `-simulate` against real services. **One live call so far, and it failed** after the first answer (see the changelog); the fixes for it are not yet confirmed on a call |
 | New receive path (ordering, loss handling) | tested offline with simulated loss and reordering; **not yet on real traffic** |
 | Video send and receive | tested offline against ffmpeg; **never validated in a live call**, as upstream |
 

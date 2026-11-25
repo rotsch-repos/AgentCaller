@@ -10,6 +10,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -291,7 +292,23 @@ type duplex struct {
 	out    *pcmPipe // nil: received audio is only analysed
 	gate   *speechGate
 	ready  chan struct{} // closed when media flows
+
+	// The received audio as one timeline of 60 ms frames that keeps up with the clock.
+	// The network delivers it in other shapes: frames of 10 to 120 ms, several in one
+	// packet, and few or none while the peer's side is silent.
+	rxMu      sync.Mutex
+	rxPend    []float32 // received, not yet a whole frame
+	rxStart   time.Time // arrival of the first audio
+	rxSamples uint64    // length of the timeline so far
+	rxAudio   uint64    // of which received
+	rxFill    uint64    // of which silence for gaps without packets
+	rxSizes   map[int]int
 }
+
+// rxSlack is how far the received audio may fall behind the clock before the timeline
+// is continued with silence: more than the network's jitter, less than what would
+// delay noticing that the peer has stopped talking.
+const rxSlack = 180 * time.Millisecond
 
 func newDuplex(cfg callConfig, events *eventLog, out io.Writer) *duplex {
 	d := &duplex{
@@ -307,8 +324,55 @@ func newDuplex(cfg callConfig, events *eventLog, out io.Writer) *duplex {
 	return d
 }
 
-// WriteFrame receives the peer's audio from the media loop.
+// WriteFrame receives the peer's audio from the media loop: whatever one packet held.
 func (d *duplex) WriteFrame(frame []float32) error {
+	now := time.Now()
+	d.rxMu.Lock()
+	defer d.rxMu.Unlock()
+	if d.rxStart.IsZero() {
+		d.rxStart = now
+		d.rxSizes = map[int]int{}
+	}
+	d.rxAudio += uint64(len(frame))
+	if len(d.rxSizes) < 16 || d.rxSizes[len(frame)] > 0 {
+		d.rxSizes[len(frame)]++
+	}
+	d.rxPend = append(d.rxPend, frame...)
+	for len(d.rxPend) >= agentcaller.FrameSamples {
+		d.take(d.rxPend[:agentcaller.FrameSamples])
+		d.rxPend = d.rxPend[agentcaller.FrameSamples:]
+	}
+	return nil
+}
+
+// fillGap continues the timeline with silence where the stream has fallen behind the
+// clock. Without it a pause is as long as the packets that happen to arrive in it, and
+// may only be noticed once the peer talks again.
+func (d *duplex) fillGap(now time.Time) {
+	d.rxMu.Lock()
+	defer d.rxMu.Unlock()
+	if d.rxStart.IsZero() || now.Sub(d.rxStart) <= rxSlack {
+		return
+	}
+	target := uint64((now.Sub(d.rxStart) - rxSlack) * agentcaller.SampleRate / time.Second)
+	if d.rxSamples+uint64(len(d.rxPend))+agentcaller.FrameSamples > target {
+		return
+	}
+	silence := make([]float32, agentcaller.FrameSamples)
+	if n := len(d.rxPend); n > 0 { // finish the frame that was begun
+		d.rxFill += uint64(agentcaller.FrameSamples - n)
+		d.take(append(append(make([]float32, 0, agentcaller.FrameSamples), d.rxPend...), silence[n:]...))
+		d.rxPend = d.rxPend[:0]
+	}
+	for d.rxSamples < target {
+		d.rxFill += agentcaller.FrameSamples
+		d.take(silence)
+	}
+}
+
+// take puts one 60 ms frame on the timeline. Callers hold rxMu.
+func (d *duplex) take(frame []float32) {
+	d.rxSamples += uint64(len(frame))
 	if d.out != nil {
 		d.out.write(frame)
 	}
@@ -324,7 +388,6 @@ func (d *duplex) WriteFrame(frame []float32) error {
 	case ended:
 		d.events.emit("speech_end", map[string]any{"at": at.Seconds(), "duration": length.Seconds()})
 	}
-	return nil
 }
 
 // Close implements agentcaller.AudioSink.
@@ -402,6 +465,14 @@ func (d *duplex) stats(call duplexCall) map[string]any {
 	if d.out != nil {
 		out["out_dropped_frames"] = d.out.dropped.Load()
 	}
+	d.rxMu.Lock()
+	out["rx_audio_ms"], out["rx_gap_fill_ms"] = ms(d.rxAudio), ms(d.rxFill)
+	sizes := map[string]int{} // samples per delivered packet → how often
+	for n, count := range d.rxSizes {
+		sizes[strconv.Itoa(n)] = count
+	}
+	out["rx_packet_samples"] = sizes
+	d.rxMu.Unlock()
 	return out
 }
 
@@ -473,8 +544,12 @@ func (d *duplex) run(ctx context.Context, call duplexCall, in io.Reader, control
 	if durTimer != nil {
 		defer durTimer.Stop()
 	}
+	gaps := time.NewTicker(60 * time.Millisecond)
+	defer gaps.Stop()
 	for {
 		select {
+		case now := <-gaps.C:
+			d.fillGap(now)
 		case reason := <-ended:
 			return finish(reason, nil)
 		case err := <-inputDone:

@@ -40,6 +40,22 @@ All notable changes to AgentCaller (meowcaller before the fork), tracked per mod
   a goodbye that ends the call. Simulated answer delay: typically 0.9 s from the reported
   pause to the first audio (0.9 to 1.9 s over six turns). Echo on a real call (the agent hearing itself and interrupting itself)
   is untested.
+- **First live call (2026-11-25): the agent greeted, answered once and then stayed
+  silent.** Two faults, both fixed here, neither confirmed on a second call yet:
+  - The speech gate counted every delivered packet as 60 ms while the audio went to
+    the output by its real length. A packet can hold 10 to 120 ms or several frames,
+    so the reported position of a turn and the audio drifted apart, and the recogniser
+    was handed the wrong stretch (it answered with its silence phrases). `call` and
+    `converse` now put the received audio on one timeline of 60 ms frames, whatever
+    the packets look like, and continue it with silence where the stream falls more
+    than 180 ms behind the clock, so a pause is noticed even when the peer's side sends
+    little or nothing during it. That this was the cause in the call is inferred from
+    its event log (the audio was not recorded); `stats` now reports `rx_audio_ms`,
+    `rx_gap_fill_ms` and `rx_packet_samples` (samples per packet → count) to see it.
+  - A short noise right after a question stopped the answer on its way, was then
+    discarded as noise, and the question was never answered. It is answered now.
+  - `converse -record-heard file.wav` writes what the agent heard, as its timeline
+    has it. It is a recording of the other person's voice: keep it local.
 
 ### cmd/meowcaller — interactive voice menu `talk` (VAD → STT → LLM → TTS) — `implemented`
 - Added the `meowcaller talk` subcommand: a state machine that plays a fixed

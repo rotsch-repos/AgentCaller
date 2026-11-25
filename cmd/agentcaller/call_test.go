@@ -485,3 +485,98 @@ func TestPumpVideoPacesAndCounts(t *testing.T) {
 		t.Fatalf("video_input_eof: %v", e)
 	}
 }
+
+// The network delivers the peer's audio in packets of any length: short frames for
+// silence, several frames at once for speech. Where the speech is reported must be
+// where it is in the output.
+func TestDuplexTimelineAnyPacketShape(t *testing.T) {
+	var evBuf, out lockedBuffer
+	cfg := callConfig{inRate: agentcaller.SampleRate, endSilence: 300 * time.Millisecond}
+	d := newDuplex(cfg, &eventLog{w: &evBuf, start: time.Now()}, &out)
+	silence := func(samples int) []float32 { return make([]float32, samples) }
+	for i := 0; i < 50; i++ { // one second in 20 ms packets
+		_ = d.WriteFrame(silence(320))
+	}
+	speech := tone(20, 0.2) // 1.2 s in packets of two frames
+	for i := 0; i < len(speech); i += 2 * frameSamples {
+		_ = d.WriteFrame(speech[i : i+2*frameSamples])
+	}
+	for i := 0; i < 5; i++ { // 1.2 s in packets of 240 ms
+		_ = d.WriteFrame(silence(3840))
+	}
+	d.out.close()
+
+	events, _ := parseEvents(t, evBuf.String())
+	e := find(events, "speech_end")
+	if e == nil {
+		t.Fatalf("no speech_end; events:\n%s", evBuf.String())
+	}
+	at, dur := e["at"].(float64), e["duration"].(float64)
+	if math.Abs(at-1.0) > 0.07 || math.Abs(dur-1.2) > 0.07 {
+		t.Fatalf("speech reported at %.2f s for %.2f s, want 1.0 s for 1.2 s", at, dur)
+	}
+	pcm := []byte(out.String())
+	if want := 2 * (50*320 + len(speech) + 5*3840); len(pcm)/2/frameSamples != want/2/frameSamples {
+		t.Fatalf("%d bytes written, want %d (whole frames)", len(pcm), want)
+	}
+	level := func(from, to float64) float64 {
+		var sum float64
+		lo, hi := int(from*agentcaller.SampleRate), int(to*agentcaller.SampleRate)
+		for i := lo; i < hi; i++ {
+			v := float64(int16(binary.LittleEndian.Uint16(pcm[2*i:]))) / 32768
+			sum += v * v
+		}
+		return math.Sqrt(sum / float64(hi-lo))
+	}
+	if in, before, after := level(at+0.06, at+dur-0.06), level(0, at-0.06), level(at+dur+0.06, at+dur+0.3); in < 0.1 || before > 0.001 || after > 0.001 {
+		t.Fatalf("levels before/in/after the reported speech: %.4f / %.4f / %.4f", before, in, after)
+	}
+	stats := d.stats(newFakeDuplexCall(agentcaller.CallPhaseActive))
+	sizes := stats["rx_packet_samples"].(map[string]int)
+	if sizes["320"] != 50 || sizes["1920"] != 10 || sizes["3840"] != 5 || stats["rx_gap_fill_ms"] != uint64(0) {
+		t.Fatalf("stats: %v", stats)
+	}
+}
+
+// While the peer is silent their side may send nothing at all. The pause must still be
+// noticed, by the clock.
+func TestDuplexFillsSilenceWhenNothingArrives(t *testing.T) {
+	var evBuf lockedBuffer
+	cfg := callConfig{inRate: agentcaller.SampleRate, endSilence: 300 * time.Millisecond}
+	d := newDuplex(cfg, &eventLog{w: &evBuf, start: time.Now()}, nil)
+	speech := tone(10, 0.2)
+	for i := 0; i < len(speech); i += frameSamples {
+		_ = d.WriteFrame(speech[i : i+frameSamples])
+	}
+	_ = d.WriteFrame(speech[:400]) // a packet that does not fill a frame
+	start := d.rxStart
+
+	d.fillGap(start.Add(600 * time.Millisecond)) // the audio is still ahead of the clock
+	if strings.Contains(evBuf.String(), "speech_end") || d.rxFill != 0 {
+		t.Fatalf("filled although nothing was missing; events:\n%s", evBuf.String())
+	}
+	d.fillGap(start.Add(1300 * time.Millisecond))
+	events, _ := parseEvents(t, evBuf.String())
+	e := find(events, "speech_end")
+	if e == nil {
+		t.Fatalf("the pause was not noticed; events:\n%s", evBuf.String())
+	}
+	if dur := e["duration"].(float64); dur < 0.6 || dur > 0.72 {
+		t.Fatalf("speech of %.2f s, want about 0.6 s", dur)
+	}
+	// The timeline has caught up with the clock, less the slack, in whole frames.
+	want := uint64((1300*time.Millisecond - rxSlack) * agentcaller.SampleRate / time.Second)
+	if d.rxSamples < want || d.rxSamples >= want+frameSamples || d.rxSamples%frameSamples != 0 || len(d.rxPend) != 0 {
+		t.Fatalf("timeline at %d samples (%d pending), want %d", d.rxSamples, len(d.rxPend), want)
+	}
+	if d.rxAudio+d.rxFill != d.rxSamples {
+		t.Fatalf("received %d + filled %d != timeline %d", d.rxAudio, d.rxFill, d.rxSamples)
+	}
+	// Audio that comes after the gap goes on from there.
+	for i := 0; i < len(speech); i += frameSamples {
+		_ = d.WriteFrame(speech[i : i+frameSamples])
+	}
+	if starts := strings.Count(evBuf.String(), "speech_start"); starts != 2 {
+		t.Fatalf("%d speech_start events, want 2", starts)
+	}
+}

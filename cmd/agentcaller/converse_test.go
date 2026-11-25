@@ -534,3 +534,46 @@ func TestParseConverseArgs(t *testing.T) {
 		}
 	}
 }
+
+// A short noise right after a question stops the answer that was on its way. It is not
+// speech, so the question is still answered.
+func TestConversationAnswersAfterNoise(t *testing.T) {
+	chain := &fakeChain{
+		transcripts:    []string{"Ist alles gut bei dir?", "Untertitelung des ZDF, 2020"},
+		replies:        [][]string{nil, {"Ja, alles gut."}},
+		sentenceFrames: 5,
+		stall:          true,
+	}
+	l := startLine(t, converseConfig{llm: LLMConfig{Prompt: "P"}}, chain.chain())
+	l.peerSays(10)
+	l.await("heard", 1)
+	for len(chain.questions()) == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	l.peerSays(3)
+	if e := l.await("heard", 2); e["ignored"] != "Untertitelung des ZDF, 2020" {
+		t.Fatalf("the noise was not ignored: %v", e)
+	}
+	if e := l.await("reply", 1); e["text"] != "Ja, alles gut." {
+		t.Fatalf("reply: %v", e)
+	}
+	asked := chain.questions()
+	if got, want := contents(asked[len(asked)-1]), []string{"system: P", "user: Ist alles gut bei dir?"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("question %q, want %q", got, want)
+	}
+}
+
+// Noise with nothing unanswered before it gets no answer.
+func TestConversationIgnoresLoneNoise(t *testing.T) {
+	chain := &fakeChain{transcripts: []string{"Untertitelung des ZDF, 2020", "Hallo?"}, replies: [][]string{{"Hallo."}}, sentenceFrames: 5}
+	l := startLine(t, converseConfig{llm: LLMConfig{Prompt: "P"}}, chain.chain())
+	l.peerSays(5)
+	l.await("heard", 1)
+	l.peerSays(8)
+	if e := l.await("reply", 1); e["text"] != "Hallo." {
+		t.Fatalf("reply: %v", e)
+	}
+	if asked := chain.questions(); len(asked) != 1 || !reflect.DeepEqual(contents(asked[0]), []string{"system: P", "user: Hallo?"}) {
+		t.Fatalf("questions: %v", asked)
+	}
+}
