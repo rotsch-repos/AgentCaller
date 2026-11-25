@@ -287,7 +287,12 @@ func celpGetMaxi(x []float32, xLen int) int {
 
 func celpGetMaxiK(x []float32, idx []int32, xLen, k int) {
 	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/ed12f359a086b28e807ba236f0977af1000859fe/wacore/src/voip/mlow/smpl_celp.rs#L445-L462
-	taken := make([]bool, xLen)
+	// The search runs up to 16 times per subframe; keep the marker array on the stack.
+	var takenBuf [smplMaxSfLen]bool
+	taken := takenBuf[:]
+	if xLen > len(takenBuf) {
+		taken = make([]bool, xLen)
+	}
 	for kk := 0; kk < k; kk++ {
 		var best float32 = -math.MaxFloat32
 		bi := 0
@@ -555,6 +560,12 @@ type CelpEncoder struct {
 	impLpcBuf []float32
 	phi       []float32
 	phiFlip   []float32
+
+	// fcbScratch and fcbBest are the codebook-search working memory, kept across
+	// subframes and zeroed before each search instead of being reallocated (the search
+	// runs 12 times per packet and its state is ~45 kB).
+	fcbScratch *fcbSearchScratch
+	fcbBest    *[smplCelpMaxRates]fcbState
 }
 
 // NewCelpEncoder builds the encoder (mirrors CelpEncoder::new).
@@ -739,6 +750,28 @@ func newFcbSearchScratch() *fcbSearchScratch {
 	}
 }
 
+// reset zeroes the scratch so a reused instance starts exactly like a fresh one.
+func (sc *fcbSearchScratch) reset() {
+	for i := range sc.fcbStates {
+		for j := range sc.fcbStates[i] {
+			sc.fcbStates[i][j].reset()
+		}
+	}
+	clear(sc.fcbs)
+	clear(sc.fcbCandidates)
+	clear(sc.uniqueSgntr)
+	sc.readIdx, sc.writeIdx = 0, 1
+	sc.fcbsSize, sc.fcbCandidatesSize, sc.uniqueSgntrSize = 0, 0, 0
+}
+
+// reset zeroes one codebook state in place.
+func (st *fcbState) reset() {
+	clear(st.pulsePositions)
+	clear(st.pulseSigns)
+	clear(st.num)
+	clear(st.den)
+}
+
 func (sc *fcbSearchScratch) swapRw() { sc.readIdx, sc.writeIdx = sc.writeIdx, sc.readIdx }
 
 func (sc *fcbSearchScratch) isUnique(sgntr uint64) bool {
@@ -876,7 +909,15 @@ func (e *CelpEncoder) smplFcbSearchDeldec(d []float32, pitchSharp float32, lag i
 	pulses *[smplCelpMaxRates][smplMaxPulsesPerSf]int16, nPulses *[smplCelpMaxRates]int16, wnrg, gainFromSearch, fcbWnrg *[smplCelpMaxRates]float32) {
 	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/ed12f359a086b28e807ba236f0977af1000859fe/wacore/src/voip/mlow/smpl_celp.rs#L1247-L1494
 	fcbSubfrlen := e.fcbSubfrlen
-	sc := newFcbSearchScratch()
+	if e.fcbScratch == nil {
+		e.fcbScratch = newFcbSearchScratch()
+		e.fcbBest = &[smplCelpMaxRates]fcbState{newFcbState(), newFcbState()}
+	} else {
+		e.fcbScratch.reset()
+		e.fcbBest[0].reset()
+		e.fcbBest[1].reset()
+	}
+	sc := e.fcbScratch
 
 	dNew := make([]float32, smplMaxSfLen)
 	dAbs := make([]float32, smplMaxSfLen)
@@ -901,7 +942,7 @@ func (e *CelpEncoder) smplFcbSearchDeldec(d []float32, pitchSharp float32, lag i
 	sc.readIdx = 0
 	sc.writeIdx = 1
 	var bestFcb [smplCelpMaxRates]fcb
-	bestFcbState := [smplCelpMaxRates]fcbState{newFcbState(), newFcbState()}
+	bestFcbState := e.fcbBest
 	var nrgThr [smplCelpMaxRates]float32
 
 	{

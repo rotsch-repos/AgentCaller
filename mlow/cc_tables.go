@@ -477,6 +477,11 @@ func (t *CcTables) Runlen(oct int32) *runlenCmfs { return &t.runlen[oct-1] }
 //
 // Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/924eb2c15aa9ffc7362293c74b2888e171831434/wacore/src/voip/mlow/rangecoder.rs#L228-L245
 func cdfWindow(base []uint16, start, n int) []uint16 {
+	// The window almost always lies inside the table: hand out a view instead of a copy.
+	// Callers only read it (range coder lookups).
+	if start >= 0 && n >= 0 && start+n <= len(base) {
+		return base[start : start+n : start+n]
+	}
 	w := make([]uint16, n)
 	for i := 0; i < n; i++ {
 		if j := start + i; j >= 0 && j < len(base) {

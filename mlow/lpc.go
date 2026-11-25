@@ -1,6 +1,9 @@
 package mlow
 
-import "math"
+import (
+	"math"
+	"sync"
+)
 
 const (
 	SmplLPCOrder  = 16
@@ -127,6 +130,13 @@ type dctTables struct {
 	csumdiff [SmplLPCOrder / 4][nfft4]float64
 	csumsum  [SmplLPCOrder / 4][nfft4]float64
 }
+
+// dctTablesOnce returns the cosine tables, built on first use. They depend only on
+// constants, so building them per frame (as the reference port did) was pure overhead.
+var dctTablesOnce = sync.OnceValue(func() *dctTables {
+	t := buildDctTables()
+	return &t
+})
 
 func buildDctTables() dctTables {
 	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/674e85164b35ca19115dfebcf605708d15951ee7/wacore/src/voip/mlow/smpl_lpc.rs#L115-L143
@@ -271,9 +281,9 @@ func smplLPCAnalyzeWithF2(windowed *[SmplLPCBufLen]float32) ([SmplLPCOrder + 1]f
 		f2d[i] = float64(f2[i])
 	}
 
-	tables := buildDctTables()
+	tables := dctTablesOnce()
 	var r [SmplLPCOrder + 1]float64
-	bruteDct(&tables, f2d, SmplLPCOrder, r[:])
+	bruteDct(tables, f2d, SmplLPCOrder, r[:])
 
 	var rc [SmplLPCOrder]float32
 	ac2rcDbl(r[:], SmplLPCOrder, smplLPCReg, rc[:])

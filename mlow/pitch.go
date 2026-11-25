@@ -209,6 +209,38 @@ type PitchEstState struct {
 	PrevPitchCorr float32
 	PrevLagblk    int32
 	PrevLagidx    int32
+
+	// scratch backs the estimator's per-frame work buffers so a running encoder stops
+	// allocating ~240 kB per packet. It carries no signal state between frames.
+	scratch f32Arena
+}
+
+// f32Arena hands out zeroed float32 work buffers from one reusable block. reset starts a
+// new round; get returns a zeroed slice exactly like make would. If a round needs more
+// than the block holds, the overflow is allocated normally and the block grows on the
+// next reset, so the steady state is allocation-free.
+type f32Arena struct {
+	buf  []float32
+	off  int
+	need int
+}
+
+func (a *f32Arena) reset() {
+	if a.need > len(a.buf) {
+		a.buf = make([]float32, a.need)
+	}
+	a.off, a.need = 0, 0
+}
+
+func (a *f32Arena) get(n int) []float32 {
+	a.need += n
+	if a.off+n > len(a.buf) {
+		return make([]float32, n)
+	}
+	s := a.buf[a.off : a.off+n : a.off+n]
+	a.off += n
+	clear(s)
+	return s
 }
 
 // ResetCond clears the cross-frame lag-block predictor (smpl_pitch_reset_cond):

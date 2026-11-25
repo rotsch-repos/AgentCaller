@@ -405,30 +405,31 @@ func SmplPitch(st *PitchEstState, ltpBuf []float32, f2 *[SmplFLen]float32, coded
 		return res
 	}
 
+	st.scratch.reset()
 	offset := peDownsampDelay
-	stage1 := make([]float32, l+offset+64)
+	stage1 := st.scratch.get(l + offset + 64)
 	pePitchHpFilter(ltpBuf, stage1[offset:offset+l])
 	hpLen := l - look
-	ltpBufHp := make([]float32, hpLen)
+	ltpBufHp := st.scratch.get(hpLen)
 	copy(ltpBufHp, stage1[offset:offset+hpLen])
 
-	stage1Ds := make([]float32, (l+offset)/2+8)
+	stage1Ds := st.scratch.get((l+offset)/2 + 8)
 	stage1Len := pePitchDownsample(stage1, l+offset, stage1Ds)
 
 	numlags0 := peNumLagsStage1
-	e1 := make([]float32, numlags0*numsubfrs+16)
+	e1 := st.scratch.get(numlags0*numsubfrs + 16)
 	peCalcE1(e1, stage1Ds, stage1Len, numsubfrs, peMinpitchStage1, peMaxpitchStage1, peLagSubfrlenStage1)
-	e2 := make([]float32, numsubfrs)
+	e2 := st.scratch.get(numsubfrs)
 	cap := (2*peFsKhz/peStage1FsKhz)*peNumLagsStage1*numsubfrs + 64
-	c := make([]float32, cap)
-	e := make([]float32, cap)
-	cStage1 := make([]float32, numlags0*numsubfrs)
+	c := st.scratch.get(cap)
+	e := st.scratch.get(cap)
+	cStage1 := st.scratch.get(numlags0 * numsubfrs)
 	peCalcCE2(cStage1, e2, stage1Ds, stage1Len, numsubfrs)
 	copy(c[:numlags0*numsubfrs], cStage1)
 
 	numlags := numlags0
 	for sf := 0; sf < numsubfrs; sf++ {
-		sqrtE1 := make([]float32, numlags)
+		sqrtE1 := st.scratch.get(numlags)
 		for i := 0; i < numlags; i++ {
 			sqrtE1[i] = float32(math.Sqrt(float64(e1[sf*numlags+i] + 1e-30)))
 		}
@@ -455,7 +456,7 @@ func SmplPitch(st *PitchEstState, ltpBuf []float32, f2 *[SmplFLen]float32, coded
 	offsetC0 := minpitchCoarse - minpitchC
 	offsetE0 := minpitchCoarse - minpitchE
 
-	h := make([]float32, numlagsCoarse*numsubfrs*2+64)
+	h := st.scratch.get(numlagsCoarse*numsubfrs*2 + 64)
 	for sf := 0; sf < numsubfrs; sf++ {
 		for i := 0; i < numlagsCoarse; i++ {
 			cv := c[sf*numlagsC+offsetC0+i]
@@ -487,7 +488,7 @@ func SmplPitch(st *PitchEstState, ltpBuf []float32, f2 *[SmplFLen]float32, coded
 		}
 	}
 	numBlocktracks := len(tab.Blocktracks)
-	utils := make([]float32, numBlocktracks)
+	utils := st.scratch.get(numBlocktracks)
 	for i := 0; i < numBlocktracks; i++ {
 		bt := &tab.Blocktracks[i]
 		var corr float32
@@ -499,7 +500,7 @@ func SmplPitch(st *PitchEstState, ltpBuf []float32, f2 *[SmplFLen]float32, coded
 	}
 	trackIdx := peGetMaxiK(utils, peNumstates1)
 
-	e1Fs := make([]float32, numlagsE*numsubfrs+16)
+	e1Fs := st.scratch.get(numlagsE*numsubfrs + 16)
 	peCalcE1(e1Fs, ltpBufHp, l-look, numsubfrs, minpitchE, minpitchE+numlagsE-1, peLagSubfrlen)
 
 	var uniqueblocks [NumSubframes]uint16
@@ -581,7 +582,7 @@ func SmplPitch(st *PitchEstState, ltpBuf []float32, f2 *[SmplFLen]float32, coded
 	// Fine search.
 	var lagindsSurv [][NumSubframes]int32
 	var blocksegsIxList []int
-	hComb := make([]float32, 2*pePitchblock)
+	hComb := st.scratch.get(2 * pePitchblock)
 	lagindCache := make(map[int32]int32)
 	for _, idx := range trackIdx {
 		rng := tab.BlocksegsIx[idx]
@@ -623,7 +624,7 @@ func SmplPitch(st *PitchEstState, ltpBuf []float32, f2 *[SmplFLen]float32, coded
 	}
 	f2w := BuildF2w(f2)
 	maxIx := peGetMaxi(sfWght[:numsubfrs])
-	spectralHarmCache := make([]float32, 50)
+	spectralHarmCache := st.scratch.get(50)
 
 	var bestUtil, bestPitchcorr float32
 	bestSurv := 0
