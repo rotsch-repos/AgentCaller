@@ -29,7 +29,7 @@ func TestParseTalkArgsLive(t *testing.T) {
 		t.Fatal("a bare target must be a live call, not dry-run/replay")
 	}
 	// Expect the same convention as notify: user config dir + separate file name.
-	want := filepath.Join("~", "config", "meowcaller", "talk-voip.db")
+	want := filepath.Join("~", "config", "agentcaller", "talk-voip.db")
 	if base, err := defaultStorePath(); err == nil {
 		want = filepath.Join(filepath.Dir(base), "talk-voip.db")
 	}
@@ -166,7 +166,7 @@ func TestProcessAudioMissingInput(t *testing.T) {
 }
 
 // TestNewTalkFlagSetDocumentsUsage verifies the usage text mentions all three
-// invocation forms, so `meowcaller talk` without arguments is self-describing.
+// invocation forms, so `agentcaller talk` without arguments is self-describing.
 func TestNewTalkFlagSetDocumentsUsage(t *testing.T) {
 	var stderr bytes.Buffer
 	var cfg talkConfig

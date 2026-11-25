@@ -1,10 +1,10 @@
-package meowcaller
+package agentcaller
 
 import (
 	"context"
 	"sync"
 
-	"github.com/purpshell/meowcaller/diag"
+	"github.com/rotsch-repos/agentcaller/diag"
 	"github.com/rs/zerolog"
 	"go.mau.fi/whatsmeow"
 )

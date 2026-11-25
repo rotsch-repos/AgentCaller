@@ -1,4 +1,4 @@
-// Command cli is a cross-platform demo of the meowcaller managed calling API.
+// Command cli is a cross-platform demo of the agentcaller managed calling API.
 //
 //	cli call <target>             Log in and place a 1:1 call; mic ↔ speaker.
 //	cli play <target> <file>      Place a call and play a .mp3/.wav/.opus file
@@ -7,11 +7,11 @@
 //	cli autoaccept [file.wav]     Log in and auto-answer incoming calls, wiring
 //	                              mic ↔ speaker (or recording the peer to file.wav).
 //
-// meowcaller wraps an already-connected whatsmeow client: this command owns the
+// agentcaller wraps an already-connected whatsmeow client: this command owns the
 // whatsmeow login/QR boilerplate and the logger, then hands the connected client
-// to meowcaller.NewClient and drives everything through the managed Call API.
+// to agentcaller.NewClient and drives everything through the managed Call API.
 //
-// Audio is captured/played via miniaudio (the meowcaller/audio/malgo subpackage),
+// Audio is captured/played via miniaudio (the agentcaller/audio/malgo subpackage),
 // so it runs on macOS, Linux and Windows with the OS default mic and speaker.
 package main
 
@@ -28,9 +28,9 @@ import (
 	"syscall"
 	"time"
 
-	meowcaller "github.com/purpshell/meowcaller"
-	"github.com/purpshell/meowcaller/audio/malgo"
-	"github.com/purpshell/meowcaller/diag"
+	agentcaller "github.com/rotsch-repos/agentcaller"
+	"github.com/rotsch-repos/agentcaller/audio/malgo"
+	"github.com/rotsch-repos/agentcaller/diag"
 	"github.com/rs/zerolog"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waCompanionReg"
@@ -48,7 +48,7 @@ func main() {
 	// As the top-level program, this command owns logger configuration (the library
 	// packages only accept a logger). A console writer keeps the demo readable; the
 	// logger is embedded in the context so the boilerplate resolves it with
-	// zerolog.Ctx(ctx), and passed to meowcaller via WithLogger.
+	// zerolog.Ctx(ctx), and passed to agentcaller via WithLogger.
 	// --diagdump <dir> is a developer flag: pull it (and its value) out of os.Args
 	// before the positional dispatch, then tee the structured log stream into the
 	// diag recorder so the raw wa/Recv|wa/Send stanza XML lands in xmpp.jsonl.
@@ -180,7 +180,7 @@ func runCall(ctx context.Context, rec *diag.Recorder, target, file string) error
 	}
 	defer wa.Disconnect()
 
-	client := meowcaller.NewClient(wa, meowcaller.WithLogger(*zerolog.Ctx(ctx)), meowcaller.WithDiagnostics(rec))
+	client := agentcaller.NewClient(wa, agentcaller.WithLogger(*zerolog.Ctx(ctx)), agentcaller.WithDiagnostics(rec))
 
 	call, err := client.Call(ctx, target)
 	if err != nil {
@@ -219,8 +219,8 @@ func runListen(ctx context.Context, rec *diag.Recorder, autoAccept bool, recordP
 	}
 	defer wa.Disconnect()
 
-	client := meowcaller.NewClient(wa, meowcaller.WithLogger(*zerolog.Ctx(ctx)), meowcaller.WithDiagnostics(rec))
-	client.OnIncomingCall(func(call *meowcaller.Call) {
+	client := agentcaller.NewClient(wa, agentcaller.WithLogger(*zerolog.Ctx(ctx)), agentcaller.WithDiagnostics(rec))
+	client.OnIncomingCall(func(call *agentcaller.Call) {
 		log.Info().Str("call_id", call.ID()).Str("peer", call.Peer().String()).Bool("auto_accept", autoAccept).Msg("incoming call")
 		if !autoAccept {
 			return
@@ -235,10 +235,10 @@ func runListen(ctx context.Context, rec *diag.Recorder, autoAccept bool, recordP
 		}
 		// Ephemeral video bridge: open the printed URL in a browser to SEE the peer's video
 		// and SEND your camera (the browser does H.264 decode/encode via WebCodecs;
-		// meowcaller carries it over the relay). Closed on Ctrl+C.
+		// agentcaller carries it over the relay). Closed on Ctrl+C.
 		if vb, err := newVideoBridge(*zerolog.Ctx(ctx)); err == nil {
-			call.ReceiveVideo(meowcaller.VideoSinkFunc(vb.WriteFrame))
-			call.OnVideoState(func(s meowcaller.VideoState) { vb.SetOrientation(s.Orientation) })
+			call.ReceiveVideo(agentcaller.VideoSinkFunc(vb.WriteFrame))
+			call.OnVideoState(func(s agentcaller.VideoState) { vb.SetOrientation(s.Orientation) })
 			vb.OnFrame(func(au []byte) { _ = call.SendVideo(au) })
 			go func() { <-ctx.Done(); _ = vb.Close() }()
 			log.Info().Str("video_url", vb.URL()).Bool("offer_is_video", call.IsVideo()).Msg("open in a browser to see/send video")
@@ -246,7 +246,7 @@ func runListen(ctx context.Context, rec *diag.Recorder, autoAccept bool, recordP
 			log.Error().Err(err).Msg("video bridge failed")
 		}
 		if recordPath != "" {
-			rec, err := meowcaller.WAVRecorder(recordPath)
+			rec, err := agentcaller.WAVRecorder(recordPath)
 			if err != nil {
 				log.Error().Err(err).Str("path", recordPath).Msg("open recorder failed")
 				return
@@ -264,7 +264,7 @@ func runListen(ctx context.Context, rec *diag.Recorder, autoAccept bool, recordP
 }
 
 // wireMic captures the OS mic and plays it into the call as outbound audio.
-func wireMic(call *meowcaller.Call) error {
+func wireMic(call *agentcaller.Call) error {
 	mic, err := malgo.Mic()
 	if err != nil {
 		return fmt.Errorf("open mic: %w", err)
@@ -274,7 +274,7 @@ func wireMic(call *meowcaller.Call) error {
 }
 
 // wireSpeaker routes the peer's decoded audio to the OS speaker.
-func wireSpeaker(call *meowcaller.Call) error {
+func wireSpeaker(call *agentcaller.Call) error {
 	speaker, err := malgo.Speaker()
 	if err != nil {
 		return fmt.Errorf("open speaker: %w", err)
@@ -284,25 +284,25 @@ func wireSpeaker(call *meowcaller.Call) error {
 }
 
 // wireLifecycle logs the call's ready/end/state transitions.
-func wireLifecycle(ctx context.Context, call *meowcaller.Call) {
+func wireLifecycle(ctx context.Context, call *agentcaller.Call) {
 	log := zerolog.Ctx(ctx)
 	call.OnReady(func() { log.Info().Str("call_id", call.ID()).Msg("media flowing") })
 	call.OnEnd(func(reason string) { log.Info().Str("call_id", call.ID()).Str("reason", reason).Msg("call ended") })
-	call.OnStateChange(func(p meowcaller.CallPhase) {
+	call.OnStateChange(func(p agentcaller.CallPhase) {
 		log.Info().Str("call_id", call.ID()).Int("phase", int(p)).Msg("call state")
 	})
 }
 
 // openFileSource opens a .mp3/.wav/.opus file as an AudioSource via the managed
 // decoders (extension-based; the constructors return an error on a format mismatch).
-func openFileSource(file string) (meowcaller.AudioSource, error) {
+func openFileSource(file string) (agentcaller.AudioSource, error) {
 	switch ext := strings.ToLower(filepath.Ext(file)); ext {
 	case ".mp3":
-		return meowcaller.MP3File(file)
+		return agentcaller.MP3File(file)
 	case ".wav":
-		return meowcaller.WAVFile(file)
+		return agentcaller.WAVFile(file)
 	case ".opus":
-		return meowcaller.OpusFile(file)
+		return agentcaller.OpusFile(file)
 	default:
 		return nil, fmt.Errorf("unsupported audio file extension %q (want .mp3/.wav/.opus)", ext)
 	}
@@ -310,7 +310,7 @@ func openFileSource(file string) (meowcaller.AudioSource, error) {
 
 // connectClient opens whatsmeow's auth store and logs in (QR on first run),
 // returning a connected client. This is the consumer's responsibility —
-// meowcaller wraps an already-connected client. busy_timeout absorbs brief lock
+// agentcaller wraps an already-connected client. busy_timeout absorbs brief lock
 // contention so a busy session doesn't error out with "database is locked".
 func connectClient(ctx context.Context) (*whatsmeow.Client, error) {
 	log := zerolog.Ctx(ctx)
@@ -358,7 +358,7 @@ func connectClient(ctx context.Context) (*whatsmeow.Client, error) {
 	// A device with no push name can't send presence; give it one, then announce
 	// availability so the server delivers call signaling to us.
 	if client.Store.PushName == "" {
-		client.Store.PushName = "meowcaller"
+		client.Store.PushName = "agentcaller"
 	}
 	if err := client.SendPresence(ctx, types.PresenceAvailable); err != nil {
 		log.Warn().Err(err).Msg("send presence failed; continuing")

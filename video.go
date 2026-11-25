@@ -1,4 +1,4 @@
-package meowcaller
+package agentcaller
 
 import (
 	"bufio"
@@ -6,10 +6,10 @@ import (
 	"sync"
 )
 
-// Video in meowcaller is encoded H.264, carried as Annex-B access units (one frame's worth
-// of start-code-prefixed NAL units). meowcaller does not encode or decode pixels — an
+// Video in agentcaller is encoded H.264, carried as Annex-B access units (one frame's worth
+// of start-code-prefixed NAL units). agentcaller does not encode or decode pixels — an
 // external codec (the browser's WebCodecs, a hardware encoder, ffmpeg, …) produces and
-// consumes the H.264; meowcaller carries it over the WhatsApp relay. The send/receive model
+// consumes the H.264; agentcaller carries it over the WhatsApp relay. The send/receive model
 // mirrors audio (see audio.go): attach a VideoSink with Call.ReceiveVideo for the peer's
 // video, and push your encoded frames with Call.SendVideo.
 

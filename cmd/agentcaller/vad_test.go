@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	meowcaller "github.com/purpshell/meowcaller"
+	agentcaller "github.com/rotsch-repos/agentcaller"
 )
 
 // frameSamples is the repo's 60 ms frame size at 16 kHz (see audio.go).
@@ -26,7 +26,7 @@ func TestVADOnRealOpusDecodedAudio(t *testing.T) {
 	if _, err := os.Stat(path); err != nil {
 		t.Skipf("fixture missing: %v", err)
 	}
-	src, err := meowcaller.WAVFile(path)
+	src, err := agentcaller.WAVFile(path)
 	if err != nil {
 		t.Fatalf("open fixture: %v", err)
 	}

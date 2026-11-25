@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	meowcaller "github.com/purpshell/meowcaller"
+	agentcaller "github.com/rotsch-repos/agentcaller"
 	"github.com/rs/zerolog"
 	"golang.org/x/term"
 )
@@ -42,7 +42,7 @@ func parseNotifyArgs(args []string, stderr io.Writer) (notifyConfig, error) {
 	flags.DurationVar(&cfg.answerTimeout, "answer-timeout", defaultAnswerTimeout, "maximum wait for the recipient to answer; 0 disables")
 	flags.DurationVar(&cfg.maxDuration, "max-duration", defaultMaxDuration, "maximum playback after answer; 0 streams to EOF")
 	flags.Usage = func() {
-		fmt.Fprintln(stderr, "usage: meowcaller notify [flags] <target> <audio.mp3|wav|ogg|opus|mulaw|ulaw|->")
+		fmt.Fprintln(stderr, "usage: agentcaller notify [flags] <target> <audio.mp3|wav|ogg|opus|mulaw|ulaw|->")
 		flags.PrintDefaults()
 	}
 	if err := flags.Parse(args); err != nil {
@@ -65,7 +65,7 @@ func defaultStorePath() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("locate user config directory: %w", err)
 	}
-	return filepath.Join(dir, "meowcaller", "whatsapp.db"), nil
+	return filepath.Join(dir, "agentcaller", "whatsapp.db"), nil
 }
 
 func runNotify(ctx context.Context, cfg notifyConfig, stderr io.Writer) error {
@@ -82,7 +82,7 @@ func runNotify(ctx context.Context, cfg notifyConfig, stderr io.Writer) error {
 	}
 	defer session.Close()
 
-	client := meowcaller.NewClient(session.client, meowcaller.WithLogger(*log))
+	client := agentcaller.NewClient(session.client, agentcaller.WithLogger(*log))
 	allowQR := false
 	if terminal, ok := stderr.(*os.File); ok {
 		allowQR = term.IsTerminal(int(terminal.Fd()))
@@ -98,23 +98,23 @@ func runNotify(ctx context.Context, cfg notifyConfig, stderr io.Writer) error {
 	return playNotification(ctx, call, source, cfg.answerTimeout, cfg.maxDuration)
 }
 
-func openAudioSource(path string) (meowcaller.AudioSource, error) {
+func openAudioSource(path string) (agentcaller.AudioSource, error) {
 	if path == "-" {
-		return meowcaller.MuLawStream(io.NopCloser(os.Stdin)), nil
+		return agentcaller.MuLawStream(io.NopCloser(os.Stdin)), nil
 	}
 	var (
-		source meowcaller.AudioSource
+		source agentcaller.AudioSource
 		err    error
 	)
 	switch ext := strings.ToLower(filepath.Ext(path)); ext {
 	case ".mp3":
-		source, err = meowcaller.MP3File(path)
+		source, err = agentcaller.MP3File(path)
 	case ".wav":
-		source, err = meowcaller.WAVFile(path)
+		source, err = agentcaller.WAVFile(path)
 	case ".ogg", ".opus":
-		source, err = meowcaller.OpusFile(path)
+		source, err = agentcaller.OpusFile(path)
 	case ".mulaw", ".ulaw":
-		source, err = meowcaller.MuLawFile(path)
+		source, err = agentcaller.MuLawFile(path)
 	default:
 		return nil, fmt.Errorf("unsupported audio extension %q (want .mp3, .wav, .ogg, .opus, .mulaw, or .ulaw; '-' is PCMU stdin)", ext)
 	}
@@ -124,11 +124,11 @@ func openAudioSource(path string) (meowcaller.AudioSource, error) {
 	return source, nil
 }
 
-func playNotification(ctx context.Context, call *meowcaller.Call, source meowcaller.AudioSource, answerTimeout, maxDuration time.Duration) error {
+func playNotification(ctx context.Context, call *agentcaller.Call, source agentcaller.AudioSource, answerTimeout, maxDuration time.Duration) error {
 	ready := make(chan struct{}, 1)
 	finished := make(chan error, 1)
 	ended := make(chan string, 1)
-	player := meowcaller.NewPlayer()
+	player := agentcaller.NewPlayer()
 	monitored := &monitoredSource{AudioSource: source}
 	var start sync.Once
 
@@ -153,16 +153,16 @@ func playNotification(ctx context.Context, call *meowcaller.Call, source meowcal
 type notificationCallState interface {
 	OnReady(func())
 	OnEnd(func(string))
-	State() meowcaller.CallPhase
+	State() agentcaller.CallPhase
 }
 
 func registerNotificationCallbacks(call notificationCallState, onReady func(), onEnd func(string)) {
 	call.OnReady(onReady)
 	call.OnEnd(onEnd)
 	switch call.State() {
-	case meowcaller.CallPhaseActive:
+	case agentcaller.CallPhaseActive:
 		onReady()
-	case meowcaller.CallPhaseEnded:
+	case agentcaller.CallPhaseEnded:
 		onEnd("ended before callback registration")
 	}
 }
@@ -226,7 +226,7 @@ func waitNotification(
 }
 
 type monitoredSource struct {
-	meowcaller.AudioSource
+	agentcaller.AudioSource
 
 	mu     sync.Mutex
 	frames int

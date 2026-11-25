@@ -1,4 +1,4 @@
-package meowcaller
+package agentcaller
 
 import (
 	"context"
@@ -11,10 +11,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/purpshell/meowcaller/mlow"
-	"github.com/purpshell/meowcaller/relay"
-	"github.com/purpshell/meowcaller/rtp"
-	"github.com/purpshell/meowcaller/stun"
+	"github.com/rotsch-repos/agentcaller/mlow"
+	"github.com/rotsch-repos/agentcaller/relay"
+	"github.com/rotsch-repos/agentcaller/rtp"
+	"github.com/rotsch-repos/agentcaller/stun"
 )
 
 // The live-relay media loop: connect+allocate to the elected relay, then run the
@@ -286,7 +286,7 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 	// Receive: DataChannel → classify. RTP → unprotect → decode → sink. A non-RTP STUN
 	// binding request gets a binding-success reply (ICE consent freshness, RFC 7675);
 	// without it the relay drops the binding and the peer's call fails.
-	// Video receive (meowcaller-native): a second WARP pipeline keyed on the video SSRC
+	// Video receive (agentcaller-native): a second WARP pipeline keyed on the video SSRC
 	// (participant slot 2), demuxed off the relay by H.264 payload type 97. NALUs are
 	// reassembled into Annex-B access units and emitted on the RTP marker bit, per WaCalls.
 	//

@@ -1,9 +1,9 @@
-package meowcaller
+package agentcaller
 
 import (
 	"testing"
 
-	"github.com/purpshell/meowcaller/signaling"
+	"github.com/rotsch-repos/agentcaller/signaling"
 )
 
 // TestSelectAudioCodec pins the codec selection: only an explicit, present

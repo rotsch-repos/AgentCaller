@@ -145,7 +145,7 @@ func (s *linkedSession) Connect(ctx context.Context, qrOut io.Writer, allowQR bo
 		return err
 	}
 	if s.client.Store.PushName == "" {
-		s.client.Store.PushName = "meowcaller"
+		s.client.Store.PushName = "agentcaller"
 	}
 	if err := s.client.SendPresence(ctx, types.PresenceAvailable); err != nil {
 		zerolog.Ctx(ctx).Warn().Err(err).Msg("send presence failed; continuing")

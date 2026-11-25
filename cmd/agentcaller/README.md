@@ -1,19 +1,19 @@
-# meowcaller command
+# agentcaller command
 
 Pair once in an interactive terminal, using the same store path the automation will use:
 
 ```text
-meowcaller pair --store <path>
+agentcaller pair --store <path>
 ```
 
 Scan the QR in WhatsApp under **Linked devices**. A successful command prints
-`MeowCaller linked device ready` and exits; later `pair` runs verify that the saved linked
+`AgentCaller linked device ready` and exits; later `pair` runs verify that the saved linked
 device can still connect.
 
-`meowcaller notify` is the headless, send-only command surface for automation:
+`agentcaller notify` is the headless, send-only command surface for automation:
 
 ```text
-meowcaller notify [flags] <target> <audio.mp3|wav|ogg|opus|mulaw|ulaw|->
+agentcaller notify [flags] <target> <audio.mp3|wav|ogg|opus|mulaw|ulaw|->
 ```
 
 `target` may be a phone number, phone JID, or LID JID. `-` reads raw 8 kHz mono G.711 PCMU from stdin. Files use their extension; `.mulaw` and `.ulaw` are also raw PCMU. The command opens no local audio/video device, attaches no inbound sink, sends the input once after the recipient answers, then hangs up.
@@ -28,19 +28,19 @@ Pairing is an explicit terminal step so the QR never enters service logs. `notif
 unpaired store when run headlessly. The command does not offer diagnostic capture and defaults
 to warning-only structured logs; `MEOW_LOG_LEVEL` opts into a different level.
 
-`meowcaller talk` is the interactive voice menu. It calls `target`, plays a short announcement,
+`agentcaller talk` is the interactive voice menu. It calls `target`, plays a short announcement,
 listens for the recipient's answer, and replies with a generated spoken answer:
 
 ```text
-meowcaller talk [flags] <target>
-meowcaller talk -dry-run [flags] <input.wav>
-meowcaller talk -replay <input.wav> [--listen-only] [flags]
+agentcaller talk [flags] <target>
+agentcaller talk -dry-run [flags] <input.wav>
+agentcaller talk -replay <input.wav> [--listen-only] [flags]
 ```
 
 (-replay is a flag, not a positional argument; the same holds for all of the following lines —
 flags may be placed after a positional argument as well.)
 
-Flags: -store (default ~/.config/meowcaller/talk-voip.db, separate from the notify store),
+Flags: -store (default ~/.config/agentcaller/talk-voip.db, separate from the notify store),
 -answer-timeout (45 s), -max-listen (60 s, per VAD round), -prompt, -say <datei>, -say-text,
 -dry-run, -replay <datei>, --listen-only, -tts-file <datei>, -out-dir <verzeichnis>
 (artifacts: transcript.json, answer.txt, answer.wav/mp3, per-round recordings),

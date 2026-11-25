@@ -1,4 +1,4 @@
-// Command meowcaller provides headless WhatsApp calling operations.
+// Command agentcaller provides headless WhatsApp calling operations.
 package main
 
 import (
@@ -78,9 +78,9 @@ func commandLogger(out io.Writer) (zerolog.Logger, error) {
 
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "usage:")
-	fmt.Fprintln(w, "  meowcaller pair [flags]")
-	fmt.Fprintln(w, "  meowcaller notify [flags] <target> <audio.mp3|wav|ogg|opus|mulaw|ulaw|->")
-	fmt.Fprintln(w, "  meowcaller talk [flags] <target>           (live VAD→STT→LLM→TTS call)")
-	fmt.Fprintln(w, "  meowcaller talk -dry-run [flags] <input.wav>")
-	fmt.Fprintln(w, "  meowcaller talk -replay [flags] -replay <input.wav> [--listen-only] (VAD-Replay)")
+	fmt.Fprintln(w, "  agentcaller pair [flags]")
+	fmt.Fprintln(w, "  agentcaller notify [flags] <target> <audio.mp3|wav|ogg|opus|mulaw|ulaw|->")
+	fmt.Fprintln(w, "  agentcaller talk [flags] <target>           (live VAD→STT→LLM→TTS call)")
+	fmt.Fprintln(w, "  agentcaller talk -dry-run [flags] <input.wav>")
+	fmt.Fprintln(w, "  agentcaller talk -replay [flags] -replay <input.wav> [--listen-only] (VAD-Replay)")
 }

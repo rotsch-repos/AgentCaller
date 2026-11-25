@@ -11,12 +11,12 @@ import (
 
 // VoipSettings is the codec-relevant subset of the server's <voip_settings> JSON
 // blob, delivered inline on an inbound <offer> and in the <ack> of an outbound
-// offer. meowcaller reads it to choose the per-call audio codec.
+// offer. agentcaller reads it to choose the per-call audio codec.
 //
-// This is meowcaller-original glue: the whatsapp-rust reference does not parse
+// This is agentcaller-original glue: the whatsapp-rust reference does not parse
 // voip_settings to pick a codec — it steers onto RFC Opus by advertising only
 // <audio rate=8000> (see BuildAccept's audio_rates). Reading use_mlow_codec_v1 is
-// a meowcaller-specific lever, so the parser carries no // Source of truth: port.
+// an upstream (meowcaller) lever, so the parser carries no // Source of truth: port.
 type VoipSettings struct {
 	// UseMlowCodecV1 mirrors encode.use_mlow_codec_v1: true => Meta's 16 kHz MLow
 	// codec, false => RFC Opus. Absent => true (MLow), matching current behavior.

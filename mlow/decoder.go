@@ -59,7 +59,7 @@ func (d *MlowDecoder) Decode(payload []byte) []float32 {
 	}
 	// SplitRed multi-frame container (0x92 <count>), seen in video calls with DTX on:
 	// WhatsApp packs several sequential 60 ms MLow frames into one RTP payload as
-	// length-delimited sub-frames (main last). Without this, meowcaller decoded the raw
+	// length-delimited sub-frames (main last). Without this, agentcaller decoded the raw
 	// container as a bare frame — range-decoding the count/length header bytes as audio →
 	// near-silence/noise (the video-call symptom). Split it and decode every sub-frame in
 	// order, concatenating, so playout matches the RTP timestamp span. This is a different

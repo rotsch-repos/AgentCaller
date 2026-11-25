@@ -42,7 +42,7 @@ func synthesize(ctx context.Context, cfg TTSConfig, text, stem string) (string, 
 		cfg = defaultTTSConfig()
 	}
 	if cfg.OutputDir == "" {
-		dir, err := os.MkdirTemp("", "meowcaller-tts-")
+		dir, err := os.MkdirTemp("", "agentcaller-tts-")
 		if err != nil {
 			return "", err
 		}

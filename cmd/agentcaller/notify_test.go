@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	meowcaller "github.com/purpshell/meowcaller"
+	agentcaller "github.com/rotsch-repos/agentcaller"
 )
 
 func TestOpenAudioSourceRoutesOggToOpusDecoder(t *testing.T) {
@@ -37,7 +37,7 @@ func TestOpenAudioSourceRoutesOggToOpusDecoder(t *testing.T) {
 func TestParseNotifyArgs(t *testing.T) {
 	var stderr strings.Builder
 	cfg, err := parseNotifyArgs([]string{
-		"--store", "/tmp/meowcaller-test.db",
+		"--store", "/tmp/agentcaller-test.db",
 		"--answer-timeout", "12s",
 		"--max-duration", "0",
 		"+15551234567", "notice.mulaw",
@@ -74,12 +74,12 @@ func TestSQLiteDSNEscapesPath(t *testing.T) {
 		t.Fatalf("pragma count = %d, want 2", len(got))
 	}
 
-	windowsDSN := sqliteDSN("C:/Users/me/AppData/Roaming/meowcaller/session.db")
+	windowsDSN := sqliteDSN("C:/Users/me/AppData/Roaming/agentcaller/session.db")
 	windowsURL, err := url.Parse(windowsDSN)
 	if err != nil {
 		t.Fatalf("parse Windows DSN: %v", err)
 	}
-	if windowsURL.Host != "" || windowsURL.Path != "/C:/Users/me/AppData/Roaming/meowcaller/session.db" {
+	if windowsURL.Host != "" || windowsURL.Path != "/C:/Users/me/AppData/Roaming/agentcaller/session.db" {
 		t.Fatalf("Windows DSN = %q, want drive letter in URL path", windowsDSN)
 	}
 }
@@ -153,13 +153,13 @@ func TestWaitNotificationCompletesAndHangsUp(t *testing.T) {
 func TestRegisterNotificationCallbacksReplaysCurrentState(t *testing.T) {
 	tests := []struct {
 		name      string
-		phase     meowcaller.CallPhase
+		phase     agentcaller.CallPhase
 		wantReady int
 		wantEnd   int
 	}{
-		{name: "active", phase: meowcaller.CallPhaseActive, wantReady: 1},
-		{name: "ended", phase: meowcaller.CallPhaseEnded, wantEnd: 1},
-		{name: "calling", phase: meowcaller.CallPhaseCalling},
+		{name: "active", phase: agentcaller.CallPhaseActive, wantReady: 1},
+		{name: "ended", phase: agentcaller.CallPhaseEnded, wantEnd: 1},
+		{name: "calling", phase: agentcaller.CallPhaseCalling},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -177,14 +177,14 @@ func TestRegisterNotificationCallbacksReplaysCurrentState(t *testing.T) {
 }
 
 type fakeNotificationCall struct {
-	phase   meowcaller.CallPhase
+	phase   agentcaller.CallPhase
 	onReady func()
 	onEnd   func(string)
 }
 
-func (c *fakeNotificationCall) OnReady(fn func())           { c.onReady = fn }
-func (c *fakeNotificationCall) OnEnd(fn func(string))       { c.onEnd = fn }
-func (c *fakeNotificationCall) State() meowcaller.CallPhase { return c.phase }
+func (c *fakeNotificationCall) OnReady(fn func())            { c.onReady = fn }
+func (c *fakeNotificationCall) OnEnd(fn func(string))        { c.onEnd = fn }
+func (c *fakeNotificationCall) State() agentcaller.CallPhase { return c.phase }
 
 func TestWaitNotificationAnswerTimeout(t *testing.T) {
 	var stopped, hungUp atomic.Bool

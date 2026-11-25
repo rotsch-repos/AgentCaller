@@ -1,4 +1,4 @@
-// Package diag is a developer-only diagnostic recorder for the meowcaller VoIP
+// Package diag is a developer-only diagnostic recorder for the agentcaller VoIP
 // stack. It writes exact, per-category call diagnostics to newline-delimited JSON
 // (one <stream>.jsonl file per category) so interop development can compare the
 // Go stack's wire behavior and key schedule against a reference byte-for-byte.

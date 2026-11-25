@@ -1,4 +1,4 @@
-package meowcaller
+package agentcaller
 
 import (
 	"encoding/binary"
@@ -194,7 +194,7 @@ type wavReader struct {
 	channels   int
 }
 
-var errBadWav = errors.New("meowcaller: not a 16-bit PCM RIFF/WAVE file")
+var errBadWav = errors.New("agentcaller: not a 16-bit PCM RIFF/WAVE file")
 
 // newWavReader parses the RIFF/WAVE header, validating 16-bit PCM, and returns a reader
 // positioned at the start of the sample data.
@@ -331,7 +331,7 @@ func OpusFile(path string) (AudioSource, error) {
 			}
 			n, derr := dec.DecodeToFloat32(packet, out)
 			if derr != nil {
-				return false, fmt.Errorf("meowcaller: opus decode: %w", derr)
+				return false, fmt.Errorf("agentcaller: opus decode: %w", derr)
 			}
 			if n == 0 {
 				continue

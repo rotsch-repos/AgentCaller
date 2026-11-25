@@ -15,7 +15,7 @@ import (
 // videoBridge is an ephemeral, localhost-only HTTP server that pipes a call's H.264 video
 // to and from a browser tab via WebCodecs: the browser decodes (display on a canvas) and
 // encodes (camera) the H.264; the CLI carries it over the WhatsApp relay through the
-// meowcaller Call API. This is a demo/dev tool and lives in the example, not the library —
+// agentcaller Call API. This is a demo/dev tool and lives in the example, not the library —
 // the library exposes only Call.OnVideoFrame / Call.SendVideoFrame / Call.OnVideoState.
 //
 // Mirrors WaCalls's React + WebCodecs client (see README Credits), collapsed into one
@@ -194,13 +194,13 @@ func (vb *videoBridge) handleIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 const videoBridgePage = `<!doctype html>
-<html><head><meta charset="utf-8"><title>meowcaller video</title>
+<html><head><meta charset="utf-8"><title>agentcaller video</title>
 <style>body{font-family:sans-serif;background:#111;color:#eee;margin:0;padding:1rem}
 .wrap{display:flex;gap:1rem;flex-wrap:wrap}.box{position:relative}
 canvas,video{background:#000;border-radius:8px;width:480px}#remote{transition:transform .2s}
 button{padding:.5rem 1rem;margin-top:.5rem}#log{font:12px monospace;color:#9a9;white-space:pre-wrap}</style></head>
 <body>
-<h3>meowcaller video bridge</h3>
+<h3>agentcaller video bridge</h3>
 <div class="wrap">
   <div class="box"><div>peer</div><canvas id="remote" width="480" height="360"></canvas></div>
   <div class="box"><div>you</div><video id="local" autoplay muted playsinline></video></div>

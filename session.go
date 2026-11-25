@@ -1,11 +1,11 @@
-package meowcaller
+package agentcaller
 
 import (
 	"github.com/rs/zerolog"
 	"go.mau.fi/whatsmeow/types"
 
-	"github.com/purpshell/meowcaller/rtp"
-	"github.com/purpshell/meowcaller/srtp"
+	"github.com/rotsch-repos/agentcaller/rtp"
+	"github.com/rotsch-repos/agentcaller/srtp"
 )
 
 // Call state machine and the media-pipeline composition (Opus payload → RTP WARP

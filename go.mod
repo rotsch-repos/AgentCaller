@@ -1,4 +1,4 @@
-module github.com/purpshell/meowcaller
+module github.com/rotsch-repos/agentcaller
 
 go 1.26.0
 

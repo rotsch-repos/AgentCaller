@@ -1,4 +1,4 @@
-package meowcaller
+package agentcaller
 
 import (
 	"context"
@@ -13,7 +13,7 @@ import (
 	"sync"
 	"unsafe"
 
-	"github.com/purpshell/meowcaller/signaling"
+	"github.com/rotsch-repos/agentcaller/signaling"
 	"go.mau.fi/whatsmeow"
 	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/proto/waE2E"
@@ -132,7 +132,7 @@ func (e *engine) sendVideoFrame(callID string, au []byte) error {
 	}
 	e.mu.Unlock()
 	if vs == nil {
-		return errors.New("meowcaller: call has no active video media")
+		return errors.New("agentcaller: call has no active video media")
 	}
 	vs.send(au)
 	return nil
@@ -144,7 +144,7 @@ func (e *engine) placeCall(ctx context.Context, target string) (*Call, error) {
 	cli := e.c.wa
 	self := cli.Store.GetLID()
 	if self.IsEmpty() {
-		return nil, errors.New("meowcaller: no own LID on this session")
+		return nil, errors.New("agentcaller: no own LID on this session")
 	}
 	peerLID, err := resolvePeerLID(ctx, cli, target)
 	if err != nil {
@@ -335,7 +335,7 @@ func (e *engine) sendPreaccept(callID string, to, creator types.JID) error {
 func (e *engine) answer(c *Call) error {
 	m := e.lookup(c.id)
 	if m == nil {
-		return fmt.Errorf("meowcaller: unknown call %s", c.id)
+		return fmt.Errorf("agentcaller: unknown call %s", c.id)
 	}
 	e.mu.Lock()
 	m.acceptPending = true

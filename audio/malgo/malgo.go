@@ -1,6 +1,6 @@
 // Package malgo provides CGO-backed microphone and speaker devices that implement
-// the meowcaller AudioSource and AudioSink interfaces. It is a separate Go module so
-// the pure-Go meowcaller core stays cgo-free; consumers opt in by importing it.
+// the agentcaller AudioSource and AudioSink interfaces. It is a separate Go module so
+// the pure-Go agentcaller core stays cgo-free; consumers opt in by importing it.
 //
 // Devices speak the codec's native format directly — 16 kHz mono — so no resampling
 // is needed. The underlying miniaudio backend (CoreAudio / WASAPI / ALSA /
@@ -12,17 +12,17 @@ import (
 	"sync"
 
 	"github.com/gen2brain/malgo"
-	meowcaller "github.com/purpshell/meowcaller"
+	agentcaller "github.com/rotsch-repos/agentcaller"
 )
 
 const numChannels = 1
 
 // Mic captures the OS default microphone as 16 kHz mono frames of
-// meowcaller.FrameSamples and returns it as an AudioSource. The device callback
+// agentcaller.FrameSamples and returns it as an AudioSource. The device callback
 // delivers arbitrary chunk sizes, so frames are re-windowed into exact 60 ms frames;
 // if the consumer falls behind, frames are dropped to keep the call real-time rather
 // than accumulating latency.
-func Mic() (meowcaller.AudioSource, error) {
+func Mic() (agentcaller.AudioSource, error) {
 	ctx, err := malgo.InitContext(nil, malgo.ContextConfig{}, nil)
 	if err != nil {
 		return nil, err
@@ -31,7 +31,7 @@ func Mic() (meowcaller.AudioSource, error) {
 	cfg := malgo.DefaultDeviceConfig(malgo.Capture)
 	cfg.Capture.Format = malgo.FormatS16
 	cfg.Capture.Channels = numChannels
-	cfg.SampleRate = meowcaller.SampleRate
+	cfg.SampleRate = agentcaller.SampleRate
 	cfg.Alsa.NoMMap = 1
 
 	frames := make(chan []int16, 16)
@@ -40,10 +40,10 @@ func Mic() (meowcaller.AudioSource, error) {
 		for i := 0; i+1 < len(in); i += 2 {
 			acc = append(acc, int16(binary.LittleEndian.Uint16(in[i:])))
 		}
-		for len(acc) >= meowcaller.FrameSamples {
-			f := make([]int16, meowcaller.FrameSamples)
-			copy(f, acc[:meowcaller.FrameSamples])
-			acc = acc[meowcaller.FrameSamples:]
+		for len(acc) >= agentcaller.FrameSamples {
+			f := make([]int16, agentcaller.FrameSamples)
+			copy(f, acc[:agentcaller.FrameSamples])
+			acc = acc[agentcaller.FrameSamples:]
 			select {
 			case frames <- f:
 			default: // consumer slow: drop to stay real-time
@@ -98,7 +98,7 @@ func (m *micSource) Close() error {
 // Speaker plays received 16 kHz mono frames to the OS default speaker and returns it
 // as an AudioSink. A small jitter buffer rides out scheduling gaps; underruns are
 // zero-filled (silence) rather than glitching.
-func Speaker() (meowcaller.AudioSink, error) {
+func Speaker() (agentcaller.AudioSink, error) {
 	ctx, err := malgo.InitContext(nil, malgo.ContextConfig{}, nil)
 	if err != nil {
 		return nil, err
@@ -107,7 +107,7 @@ func Speaker() (meowcaller.AudioSink, error) {
 	cfg := malgo.DefaultDeviceConfig(malgo.Playback)
 	cfg.Playback.Format = malgo.FormatS16
 	cfg.Playback.Channels = numChannels
-	cfg.SampleRate = meowcaller.SampleRate
+	cfg.SampleRate = agentcaller.SampleRate
 
 	in := make(chan []int16, 64)
 	var (

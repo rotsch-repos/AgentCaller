@@ -1,7 +1,7 @@
-package meowcaller
+package agentcaller
 
 import (
-	"github.com/purpshell/meowcaller/diag"
+	"github.com/rotsch-repos/agentcaller/diag"
 	"github.com/rs/zerolog"
 )
 

@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"strings"
 
-	"github.com/purpshell/meowcaller/util"
+	"github.com/rotsch-repos/agentcaller/util"
 	"github.com/rs/zerolog"
 )
 

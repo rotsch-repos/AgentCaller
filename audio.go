@@ -1,4 +1,4 @@
-package meowcaller
+package agentcaller
 
 import (
 	"encoding/binary"
@@ -6,7 +6,7 @@ import (
 	"io"
 )
 
-// Audio in meowcaller is 16 kHz mono float32 PCM carried in 60 ms frames — the rate
+// Audio in agentcaller is 16 kHz mono float32 PCM carried in 60 ms frames — the rate
 // and framing the MLow codec encodes. Every AudioSource and AudioSink speaks this
 // format; the built-in decoders convert foreign formats (WAV/MP3/Opus/PCMU) into it.
 const (
@@ -16,7 +16,7 @@ const (
 	FrameSamples = 960
 )
 
-var errSourceClosed = errors.New("meowcaller: audio source closed")
+var errSourceClosed = errors.New("agentcaller: audio source closed")
 
 // AudioSource yields successive 16 kHz mono PCM frames of FrameSamples to play into a
 // call. ReadFrame returns io.EOF when the source is exhausted (a Player then fires
@@ -31,7 +31,7 @@ type AudioSource interface {
 
 // AudioSink consumes the 16 kHz mono PCM frames decoded from the peer's audio. Attach
 // one with Call.Receive; built-ins record to a WAV file or forward to a callback. A
-// CGO Speaker() sink lives in the meowcaller/audio/malgo subpackage.
+// CGO Speaker() sink lives in the agentcaller/audio/malgo subpackage.
 type AudioSink interface {
 	// WriteFrame consumes one decoded mono frame from the peer.
 	WriteFrame(frame []float32) error

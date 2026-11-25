@@ -136,7 +136,7 @@ func (b *whisperCLIBackend) Transcribe(ctx context.Context, wavPath string) (str
 func (b *whisperCLIBackend) runWhisper(ctx context.Context, bin, wavPath, model, device string, env []string) (string, error) {
 	runCtx, cancel := context.WithTimeout(ctx, b.cfg.Timeout)
 	defer cancel()
-	outDir, err := os.MkdirTemp("", "meowcaller-stt-")
+	outDir, err := os.MkdirTemp("", "agentcaller-stt-")
 	if err != nil {
 		return "", err
 	}

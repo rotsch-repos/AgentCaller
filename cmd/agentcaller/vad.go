@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	meowcaller "github.com/purpshell/meowcaller"
+	agentcaller "github.com/rotsch-repos/agentcaller"
 )
 
 // VADConfig tunes the energy-based voice-activity detector. Thresholds are expressed
@@ -110,7 +110,7 @@ func (v *vadSink) OnEnd(fn func(VADResult)) {
 	}()
 }
 
-// WriteFrame implements meowcaller.AudioSink; it consumes one 60 ms mono frame.
+// WriteFrame implements agentcaller.AudioSink; it consumes one 60 ms mono frame.
 func (v *vadSink) WriteFrame(frame []float32) error {
 	res, endNow := v.process(frame)
 	if endNow {
@@ -122,7 +122,7 @@ func (v *vadSink) WriteFrame(frame []float32) error {
 	return nil
 }
 
-// Close implements meowcaller.AudioSink; the buffer is kept for inspection.
+// Close implements agentcaller.AudioSink; the buffer is kept for inspection.
 func (v *vadSink) Close() error { return nil }
 
 func (v *vadSink) process(frame []float32) (VADResult, bool) {
@@ -213,7 +213,7 @@ func (v *vadSink) TrimmedAudio() []float32 {
 	defer v.mu.Unlock()
 	start, end := 0, len(v.frames)
 	if v.speechStart >= 0 {
-		sample := func(frame int) int { return frame * meowcaller.FrameSamples }
+		sample := func(frame int) int { return frame * agentcaller.FrameSamples }
 		start = sample(v.speechStart) - 400
 		if start < 0 {
 			start = 0
@@ -256,8 +256,8 @@ func writeWAV16(path string, samples []float32) error {
 	binary.LittleEndian.PutUint32(hdr[16:20], 16)
 	binary.LittleEndian.PutUint16(hdr[20:22], 1)
 	binary.LittleEndian.PutUint16(hdr[22:24], 1)
-	binary.LittleEndian.PutUint32(hdr[24:28], meowcaller.SampleRate)
-	binary.LittleEndian.PutUint32(hdr[28:32], meowcaller.SampleRate*2)
+	binary.LittleEndian.PutUint32(hdr[24:28], agentcaller.SampleRate)
+	binary.LittleEndian.PutUint32(hdr[28:32], agentcaller.SampleRate*2)
 	binary.LittleEndian.PutUint16(hdr[32:34], 2)
 	binary.LittleEndian.PutUint16(hdr[34:36], 16)
 	copy(hdr[36:40], "data")
@@ -281,7 +281,7 @@ func writeWAV16(path string, samples []float32) error {
 
 // feedSinkTo drives an AudioSink from an AudioSource frame by frame until the sink
 // signals the round ended or the source is exhausted. It returns the final result.
-func feedSinkTo(sink *vadSink, src meowcaller.AudioSource) VADResult {
+func feedSinkTo(sink *vadSink, src agentcaller.AudioSource) VADResult {
 	defer src.Close()
 	for {
 		frame, err := src.ReadFrame()

@@ -1,4 +1,4 @@
-package meowcaller
+package agentcaller
 
 import (
 	"bytes"
@@ -6,8 +6,8 @@ import (
 
 	"go.mau.fi/whatsmeow/types"
 
-	"github.com/purpshell/meowcaller/rtp"
-	"github.com/purpshell/meowcaller/srtp"
+	"github.com/rotsch-repos/agentcaller/rtp"
+	"github.com/rotsch-repos/agentcaller/srtp"
 )
 
 func peerJID() types.JID { return types.JID{User: "222222222222222", Server: types.HiddenUserServer} }

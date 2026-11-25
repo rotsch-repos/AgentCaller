@@ -26,7 +26,7 @@ func parsePairArgs(args []string, stderr io.Writer) (pairConfig, error) {
 	flags.SetOutput(stderr)
 	flags.StringVar(&cfg.storePath, "store", defaultStore, "linked-device SQLite store")
 	flags.Usage = func() {
-		fmt.Fprintln(stderr, "usage: meowcaller pair [flags]")
+		fmt.Fprintln(stderr, "usage: agentcaller pair [flags]")
 		flags.PrintDefaults()
 	}
 	if err := flags.Parse(args); err != nil {
@@ -53,6 +53,6 @@ func runPair(ctx context.Context, cfg pairConfig, stderr io.Writer) error {
 	if err := session.Connect(ctx, stderr, true); err != nil {
 		return err
 	}
-	fmt.Fprintln(stderr, "MeowCaller linked device ready")
+	fmt.Fprintln(stderr, "AgentCaller linked device ready")
 	return nil
 }

@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	meowcaller "github.com/purpshell/meowcaller"
+	agentcaller "github.com/rotsch-repos/agentcaller"
 	"github.com/rs/zerolog"
 	"golang.org/x/term"
 )
@@ -72,11 +72,11 @@ type talkConfig struct {
 // non-POSIX hosts via os.UserConfigDir.
 func parseTalkArgs(args []string, stderr io.Writer) (talkConfig, error) {
 	var cfg talkConfig
-	storeDefault := filepath.Join("~", ".config", "meowcaller", "talk-voip.db")
+	storeDefault := filepath.Join("~", ".config", "agentcaller", "talk-voip.db")
 	if base, err := defaultStorePath(); err == nil {
 		storeDefault = filepath.Join(filepath.Dir(base), "talk-voip.db")
 	} else if home, herr := os.UserHomeDir(); herr == nil {
-		storeDefault = filepath.Join(home, ".config", "meowcaller", "talk-voip.db")
+		storeDefault = filepath.Join(home, ".config", "agentcaller", "talk-voip.db")
 	}
 	flags := newTalkFlagSet(&cfg, stderr, storeDefault)
 	if err := flags.Parse(reorderFlagsFirst(flags, args)); err != nil {
@@ -133,9 +133,9 @@ func newTalkFlagSet(cfg *talkConfig, stderr io.Writer, storeDefault string) *fla
 	flags.DurationVar(&cfg.vadSilence, "vad-silence", defaultVADConfig().SilenceDuration, "silence after speech that closes a round")
 	flags.DurationVar(&cfg.vadMinSpeech, "vad-min-speech", defaultVADConfig().MinSpeech, "minimum speech duration that counts as an answer")
 	flags.Usage = func() {
-		fmt.Fprintln(stderr, "usage: meowcaller talk [flags] <target>")
-		fmt.Fprintln(stderr, "       meowcaller talk -dry-run [flags] <input.wav>")
-		fmt.Fprintln(stderr, "       meowcaller talk -replay <input.wav> [--listen-only] (VAD-Replay, -replay ist ein Flag)")
+		fmt.Fprintln(stderr, "usage: agentcaller talk [flags] <target>")
+		fmt.Fprintln(stderr, "       agentcaller talk -dry-run [flags] <input.wav>")
+		fmt.Fprintln(stderr, "       agentcaller talk -replay <input.wav> [--listen-only] (VAD-Replay, -replay ist ein Flag)")
 		flags.PrintDefaults()
 	}
 	return flags
@@ -184,7 +184,7 @@ func artifactDir(cfg talkConfig) (string, error) {
 		dir = cfg.saveAudio
 	}
 	if dir == "" {
-		created, err := os.MkdirTemp("", "meowcaller-talk-")
+		created, err := os.MkdirTemp("", "agentcaller-talk-")
 		if err != nil {
 			return "", err
 		}
@@ -302,7 +302,7 @@ func processAudio(ctx context.Context, cfg talkConfig, inWav, outDir string, log
 
 // readWAV16 decodes a WAV file into 16 kHz mono float32 samples.
 func readWAV16(path string) []float32 {
-	src, err := meowcaller.WAVFile(path)
+	src, err := agentcaller.WAVFile(path)
 	if err != nil {
 		return nil
 	}
@@ -364,7 +364,7 @@ func runReplay(ctx context.Context, cfg talkConfig, log zerolog.Logger) error {
 	if err != nil {
 		return err
 	}
-	src, err := meowcaller.WAVFile(cfg.replayPath)
+	src, err := agentcaller.WAVFile(cfg.replayPath)
 	if err != nil {
 		return fmt.Errorf("open replay file: %w", err)
 	}
@@ -440,7 +440,7 @@ func runDryRun(ctx context.Context, cfg talkConfig, log zerolog.Logger) error {
 }
 
 // liveCall is the state machine of one interactive call, bound to a real
-// meowcaller.Call. It is driven by a single goroutine that waits on channels so
+// agentcaller.Call. It is driven by a single goroutine that waits on channels so
 // the announcement, listening rounds, interim line, and answer never overlap on
 // the shared player.
 type liveCall struct {
@@ -448,8 +448,8 @@ type liveCall struct {
 	cancel context.CancelFunc
 	cfg    talkConfig
 	log    zerolog.Logger
-	call   *meowcaller.Call
-	player *meowcaller.Player
+	call   *agentcaller.Call
+	player *agentcaller.Player
 	outDir string
 
 	// interimWav is the pre-synthesized interim message.
@@ -470,7 +470,7 @@ func runLiveCall(ctx context.Context, cfg talkConfig, log zerolog.Logger, stderr
 	}
 	defer session.Close()
 
-	client := meowcaller.NewClient(session.client, meowcaller.WithLogger(log))
+	client := agentcaller.NewClient(session.client, agentcaller.WithLogger(log))
 	allowQR := false
 	if terminal, ok := stderr.(*os.File); ok {
 		allowQR = term.IsTerminal(int(terminal.Fd()))
@@ -494,7 +494,7 @@ func runLiveCall(ctx context.Context, cfg talkConfig, log zerolog.Logger, stderr
 	}
 
 	// Announcement: -say file wins, otherwise synthesize -say-text.
-	var announceSource meowcaller.AudioSource
+	var announceSource agentcaller.AudioSource
 	if cfg.sayPath != "" {
 		if announceSource, err = openAudioSource(cfg.sayPath); err != nil {
 			return err
@@ -504,7 +504,7 @@ func runLiveCall(ctx context.Context, cfg talkConfig, log zerolog.Logger, stderr
 		if err != nil {
 			return fmt.Errorf("synthesize announcement: %w", err)
 		}
-		if announceSource, err = meowcaller.WAVFile(sayWav); err != nil {
+		if announceSource, err = agentcaller.WAVFile(sayWav); err != nil {
 			return err
 		}
 	}
@@ -518,9 +518,9 @@ func runLiveCall(ctx context.Context, cfg talkConfig, log zerolog.Logger, stderr
 	// (review: orphan whisper on GPU).
 	callCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	nc := &liveCall{ctx: callCtx, cancel: cancel, cfg: cfg, log: log, call: call, player: meowcaller.NewPlayer(), outDir: outDir, interimWav: interimWav}
+	nc := &liveCall{ctx: callCtx, cancel: cancel, cfg: cfg, log: log, call: call, player: agentcaller.NewPlayer(), outDir: outDir, interimWav: interimWav}
 	call.Subscribe(nc.player)
-	call.Receive(meowcaller.SinkFunc(func([]float32) {})) // discard ringing audio
+	call.Receive(agentcaller.SinkFunc(func([]float32) {})) // discard ringing audio
 
 	ready := make(chan struct{}, 1)
 	ended := make(chan string, 1)
@@ -589,7 +589,7 @@ func (nc *liveCall) awaitCompletion(done <-chan error, ended <-chan string) erro
 // runConversation plays the announcement, then runs the listening rounds, and
 // finally the answer exchange. It returns nil when the call completed its
 // intended flow.
-func (nc *liveCall) runConversation(announce meowcaller.AudioSource, ended <-chan string) error {
+func (nc *liveCall) runConversation(announce agentcaller.AudioSource, ended <-chan string) error {
 	defer announce.Close()
 	announceDone := make(chan struct{})
 	nc.player.OnFinish(func() { close(announceDone) })
@@ -683,12 +683,12 @@ func (nc *liveCall) processAndAnswer(round int, ended <-chan string) {
 		nc.waitIdle(3 * time.Second)
 		nc.playMu.Lock()
 		defer nc.playMu.Unlock()
-		if nc.player.State() != meowcaller.PlayerIdle {
+		if nc.player.State() != agentcaller.PlayerIdle {
 			// The answer (or a fallback line) already took the player; the interim is skipped.
 			close(interimDone)
 			return
 		}
-		src, err := meowcaller.WAVFile(nc.interimWav)
+		src, err := agentcaller.WAVFile(nc.interimWav)
 		if err != nil {
 			close(interimDone)
 			return
@@ -758,7 +758,7 @@ func (nc *liveCall) sayLine(text string, ended <-chan string) bool {
 // playLine plays a WAV to the call and waits for it to finish.
 func (nc *liveCall) playLine(wav string, ended <-chan string) {
 	nc.waitIdle(5 * time.Second)
-	src, err := meowcaller.WAVFile(wav)
+	src, err := agentcaller.WAVFile(wav)
 	if err != nil {
 		nc.log.Warn().Err(err).Msg("open line wav failed")
 		return
@@ -778,7 +778,7 @@ func (nc *liveCall) playLine(wav string, ended <-chan string) {
 // waitIdle blocks until the player is idle or the timeout is reached.
 func (nc *liveCall) waitIdle(timeout time.Duration) {
 	deadline := time.Now().Add(timeout)
-	for nc.player.State() != meowcaller.PlayerIdle {
+	for nc.player.State() != agentcaller.PlayerIdle {
 		if time.Now().After(deadline) {
 			return
 		}

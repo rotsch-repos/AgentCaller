@@ -1,4 +1,4 @@
-package meowcaller
+package agentcaller
 
 import (
 	"sync"
@@ -121,7 +121,7 @@ func (c *Call) onVideoStateFn() func(VideoState) {
 
 // SendVideo sends one already-encoded H.264 access unit (Annex-B) to the peer — fed from an
 // external encoder (browser WebCodecs, ffmpeg, hardware). Returns an error if the call has no
-// active video media yet. meowcaller does not encode pixels (no pure-Go H.264 encoder); this
+// active video media yet. agentcaller does not encode pixels (no pure-Go H.264 encoder); this
 // is the video analog of writing a sample to a track.
 //
 // NOT VALIDATED: the video send media path is unproven.

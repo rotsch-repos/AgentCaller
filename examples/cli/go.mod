@@ -1,10 +1,10 @@
-module github.com/purpshell/meowcaller/examples/cli
+module github.com/rotsch-repos/agentcaller/examples/cli
 
 go 1.25.0
 
 require (
-	github.com/purpshell/meowcaller v0.0.0
-	github.com/purpshell/meowcaller/audio/malgo v0.0.0
+	github.com/rotsch-repos/agentcaller v0.0.0
+	github.com/rotsch-repos/agentcaller/audio/malgo v0.0.0
 	github.com/rs/zerolog v1.35.1
 	go.mau.fi/whatsmeow v0.0.0-20260609091626-4e622162b959
 	google.golang.org/protobuf v1.36.11
@@ -46,6 +46,6 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 )
 
-replace github.com/purpshell/meowcaller => ../../
+replace github.com/rotsch-repos/agentcaller => ../../
 
-replace github.com/purpshell/meowcaller/audio/malgo => ../../audio/malgo
+replace github.com/rotsch-repos/agentcaller/audio/malgo => ../../audio/malgo
