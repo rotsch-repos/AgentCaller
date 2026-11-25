@@ -24,6 +24,7 @@ type Call struct {
 	onState      func(CallPhase)
 	videoSink    VideoSink
 	onVideoState func(VideoState)
+	concealLoss  bool
 }
 
 // ID returns the call-id (32 uppercase hex chars).
@@ -117,6 +118,37 @@ func (c *Call) onVideoStateFn() func(VideoState) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.onVideoState
+}
+
+// ConcealLosses selects what a lost inbound audio packet is replaced with. Off (the
+// default) it is silence of the same length, which is what speech recognition copes with
+// best. On, the last pitch cycle is continued and faded out (package plc), which is
+// kinder to a human listening on a speaker.
+func (c *Call) ConcealLosses(on bool) {
+	c.mu.Lock()
+	c.concealLoss = on
+	c.mu.Unlock()
+}
+
+func (c *Call) concealLossesOn() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.concealLoss
+}
+
+// ReceiveStats reports the inbound audio path's packet counters (received, lost,
+// reordered, late) and how much audio was concealed. Zero before media is up.
+func (c *Call) ReceiveStats() ReceiveStats {
+	c.eng.mu.Lock()
+	var rx *audioReceiver
+	if m := c.eng.calls[c.id]; m != nil {
+		rx = m.audioRx
+	}
+	c.eng.mu.Unlock()
+	if rx == nil {
+		return ReceiveStats{}
+	}
+	return rx.stats()
 }
 
 // SendVideo sends one already-encoded H.264 access unit (Annex-B) to the peer — fed from an

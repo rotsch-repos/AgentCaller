@@ -268,11 +268,13 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 			if err != nil {
 				continue
 			}
-			e.c.diag.Emit("media_out", map[string]any{
-				"frame": txCount, "frame_samples": len(frame), "pcm_rms": rmsFloat32(frame),
-				"payload_len": len(payload), "payload_hex": hex.EncodeToString(payload),
-				"packet_len": len(packet), "packet_hex": hex.EncodeToString(packet),
-			})
+			if e.c.diag != nil { // the hex dumps cost more than the send itself
+				e.c.diag.Emit("media_out", map[string]any{
+					"frame": txCount, "frame_samples": len(frame), "pcm_rms": rmsFloat32(frame),
+					"payload_len": len(payload), "payload_hex": hex.EncodeToString(payload),
+					"packet_len": len(packet), "packet_hex": hex.EncodeToString(packet),
+				})
+			}
 			if _, err := ch.Send(packet); err != nil {
 				return
 			}
@@ -326,6 +328,33 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 		e.mu.Unlock()
 	}()
 
+	// Inbound audio: reorder → decode → conceal → sink (rx.go). In-sequence packets are
+	// decoded on arrival; only a gap makes it hold packets, for at most 80 ms.
+	rx := newAudioReceiver(dec)
+	rx.onDecoded = func(seq uint16, frame []float32, payloadLen int) {
+		if e.c.diag != nil {
+			e.c.diag.Emit("media_in", map[string]any{
+				"seq": seq, "samples": len(frame),
+				"pcm_rms": rmsFloat32(frame), "payload_len": payloadLen,
+			})
+		}
+	}
+	rx.onLost = func(packets int, tsGap uint32, samples int) {
+		log.Debug().Int("packets", packets).Uint32("ts_gap", tsGap).Int("concealed_samples", samples).Msg("inbound audio loss concealed")
+		e.c.diag.Emit("media_in", map[string]any{"event": "lost", "packets": packets, "ts_gap": tsGap, "concealed_samples": samples})
+	}
+	e.mu.Lock()
+	if m := e.calls[callID]; m != nil {
+		m.audioRx = rx
+	}
+	e.mu.Unlock()
+	defer func() {
+		rx.close()
+		st := rx.stats()
+		log.Info().Uint64("received", st.Received).Uint64("lost", st.Lost).Uint64("reordered", st.Reordered).
+			Uint64("late", st.Late).Uint64("duplicates", st.Duplicates).Msg("inbound audio summary")
+	}()
+
 	buf := make([]byte, 1500)
 	var rtpIn, rtpSeen, unprotectFail, vidIn uint64
 	mediaReady := false
@@ -354,10 +383,12 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 		relayRx.Add(1)
 		pkt := buf[:n]
 		isRTP := relay.ClassifyRelayPacket(pkt) == relay.RelayPacketRtp
-		e.c.diag.Emit("relay", map[string]any{
-			"event": "packet_in", "bytes": n, "is_rtp": isRTP,
-			"packet_hex": hex.EncodeToString(pkt),
-		})
+		if e.c.diag != nil {
+			e.c.diag.Emit("relay", map[string]any{
+				"event": "packet_in", "bytes": n, "is_rtp": isRTP,
+				"packet_hex": hex.EncodeToString(pkt),
+			})
+		}
 		if !isRTP {
 			mt, isStun := stun.StunMessageType(pkt)
 			if isStun && mt == stun.MsgBindingRequest {
@@ -431,16 +462,15 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 			"event": "in", "ssrc": hdr.Ssrc, "seq": hdr.SequenceNumber,
 			"ts": hdr.Timestamp, "pt": hdr.PayloadType, "marker": hdr.Marker,
 		})
-		e.c.diag.Emit("srtp", map[string]any{
-			"event": "frame_unprotected", "ssrc": hdr.Ssrc, "seq": hdr.SequenceNumber,
-			"payload_len": len(payload), "payload_hex": hex.EncodeToString(payload),
-		})
-		frame := dec.Decode(payload)
-		e.c.diag.Emit("media_in", map[string]any{
-			"seq": hdr.SequenceNumber, "samples": len(frame),
-			"pcm_rms": rmsFloat32(frame), "payload_len": len(payload),
-		})
-		_ = sink.WriteFrame(frame)
+		if e.c.diag != nil {
+			e.c.diag.Emit("srtp", map[string]any{
+				"event": "frame_unprotected", "ssrc": hdr.Ssrc, "seq": hdr.SequenceNumber,
+				"payload_len": len(payload), "payload_hex": hex.EncodeToString(payload),
+			})
+		}
+		if rx.push(hdr.SequenceNumber, hdr.Timestamp, payload, time.Now(), sink, call != nil && call.concealLossesOn()) == 0 {
+			continue // held behind a gap, late or duplicate: nothing decoded yet
+		}
 		if rtpIn++; rtpIn == 1 {
 			markMediaReady("first RTP decoded from relay, inbound audio flowing")
 		}

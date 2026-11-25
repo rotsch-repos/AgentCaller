@@ -50,9 +50,10 @@ type engineCall struct {
 	from    types.JID // the <call> "from" — where stanzas are addressed
 
 	direction CallDirection
-	codec     AudioCodec   // audio codec for this call, selected from voip_settings (MLow default)
-	isVideo   bool         // inbound offer advertised <video> (video call)
-	videoTx   *videoSender // video send pipeline, live while media runs
+	codec     AudioCodec     // audio codec for this call, selected from voip_settings (MLow default)
+	isVideo   bool           // inbound offer advertised <video> (video call)
+	videoTx   *videoSender   // video send pipeline, live while media runs
+	audioRx   *audioReceiver // inbound audio path, live while media runs
 	started   bool
 	cancel    context.CancelFunc // tears down this call's media goroutine
 
