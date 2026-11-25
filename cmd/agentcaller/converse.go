@@ -233,6 +233,12 @@ type thinkSink struct {
 	// looked is a finished lookup, the model's request and what came back. It is kept
 	// with the answer, so that the next question can build on it.
 	looked func([]chatMessage)
+	// later takes work that outlasts the answer and returns what to tell the model about
+	// it. Without it, such work is waited for like any lookup.
+	later func(toolCall) string
+	// plain asks for an answer without tools: a report tells what came back and looks
+	// nothing up on its own.
+	plain bool
 }
 
 // callEvent is what the conversation needs from a duplex event line.
@@ -389,9 +395,21 @@ func (w ctxWriter) Write(b []byte) (int, error) {
 
 type segment struct {
 	greeting bool
+	report   *jobReport // background work has come back
+	deferred int        // how often the report let the peer go first
 	at, dur  time.Duration
 	ended    time.Time // when the pause was reported: the start of the answer delay
 }
+
+// jobReport is the outcome of work the agent did in the background.
+type jobReport struct {
+	call   toolCall
+	result string
+	err    error
+}
+
+// maxJobs is how much background work may run at once.
+const maxJobs = 3
 
 type conversation struct {
 	cfg     converseConfig
@@ -410,6 +428,8 @@ type conversation struct {
 	cancelTurn context.CancelFunc
 	history    []chatMessage
 	pending    []string // heard but not answered yet
+	jobs       int      // background work under way
+	life       context.Context
 }
 
 func newConversation(cfg converseConfig, chain voiceChain, eventsOut io.Writer) *conversation {
@@ -433,6 +453,9 @@ func (c *conversation) run(ctx context.Context, call duplexCall) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	defer c.sayPipe.CloseWithError(io.ErrClosedPipe)
+	c.mu.Lock()
+	c.life = ctx
+	c.mu.Unlock()
 	d := newDuplex(c.cfg.call, c.events, c.heard)
 	go c.follow(ctx)
 	go c.work(ctx)
@@ -502,9 +525,12 @@ func (c *conversation) work(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case s := <-c.turns:
-			if s.greeting {
+			switch {
+			case s.greeting:
 				c.greet(ctx)
-			} else {
+			case s.report != nil:
+				c.report(ctx, s)
+			default:
 				c.answer(ctx, s)
 			}
 		}
@@ -541,6 +567,99 @@ func (c *conversation) greet(ctx context.Context) {
 	}
 	c.remember("", nil, c.cfg.greeting)
 	c.events.emit("reply", map[string]any{"text": c.cfg.greeting, "greeting": true})
+}
+
+// startJob runs a background tool for as long as the call lasts, not just the turn that
+// asked for it, and queues its outcome as a turn of its own.
+func (c *conversation) startJob(call toolCall) string {
+	c.mu.Lock()
+	life := c.life
+	if c.jobs >= maxJobs || life == nil {
+		c.mu.Unlock()
+		return jobRefused
+	}
+	c.jobs++
+	c.mu.Unlock()
+	go func() {
+		start := time.Now()
+		result, err := runTool(life, c.cfg.tools, call)
+		c.mu.Lock()
+		c.jobs--
+		c.mu.Unlock()
+		if life.Err() != nil {
+			return
+		}
+		fields := map[string]any{"name": call.Function.Name, "ms": time.Since(start).Milliseconds()}
+		if err != nil {
+			fields["error"] = err.Error()
+		} else {
+			fields["result"] = clip(result, 300)
+		}
+		c.events.emit("lookup_done", fields)
+		select {
+		case c.turns <- segment{report: &jobReport{call: call, result: result, err: err}, ended: time.Now()}:
+		case <-life.Done():
+		}
+	}()
+	return jobStarted
+}
+
+// report tells the peer what background work brought back, in a gap of the conversation.
+func (c *conversation) report(ctx context.Context, s segment) {
+	for {
+		if len(c.turns) > 0 && s.deferred < 3 {
+			// The peer said something in the meantime: that is answered first.
+			s.deferred++
+			select {
+			case c.turns <- s:
+				return
+			default:
+			}
+		}
+		c.mu.Lock()
+		talking := c.peerTalks && !c.cfg.noBargeIn
+		c.mu.Unlock()
+		if !talking && c.say.remaining() == 0 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	r := s.report
+	note := fmt.Sprintf(jobDone, r.call.Function.Name, r.call.Function.Arguments, r.result)
+	if r.err != nil {
+		note = fmt.Sprintf(jobFailed, r.call.Function.Name, r.call.Function.Arguments, r.err)
+	}
+	// The outcome is part of the conversation from here on, whether or not the agent gets
+	// to say it now: if the peer cuts in, the next answer still knows it.
+	c.mu.Lock()
+	c.history = append(c.history, chatMessage{Role: "user", Content: note})
+	msgs := append([]chatMessage{{Role: "system", Content: c.cfg.llm.Prompt}}, c.history...)
+	c.mu.Unlock()
+
+	turn, end, ok := c.beginTurn(ctx, false)
+	if !ok {
+		return
+	}
+	defer end()
+	spoken, looked, first, err := c.respond(turn, msgs, true)
+	interrupted := turn.Err() != nil && ctx.Err() == nil
+	if err != nil && !interrupted && ctx.Err() == nil {
+		c.events.emit("reply_error", map[string]any{"error": err.Error()})
+	}
+	if len(spoken) == 0 {
+		return
+	}
+	reply := strings.Join(spoken, " ")
+	c.remember("", looked, reply)
+	fields := map[string]any{"text": reply, "interrupted": interrupted, "report": true}
+	if !first.IsZero() {
+		fields["first_audio_ms"] = first.Sub(s.ended).Milliseconds() // since the work came back
+	}
+	c.events.emit("reply", fields)
 }
 
 // maxHistory is how many messages of the conversation the model is shown again.
@@ -617,7 +736,7 @@ func (c *conversation) answer(ctx context.Context, s segment) {
 		return // the peer is talking again: answer everything at the next pause
 	}
 	defer end()
-	spoken, looked, first, err := c.respond(turn, msgs)
+	spoken, looked, first, err := c.respond(turn, msgs, false)
 	interrupted := turn.Err() != nil && ctx.Err() == nil
 	if err != nil && !interrupted && ctx.Err() == nil {
 		c.events.emit("reply_error", map[string]any{"error": err.Error()})
@@ -655,7 +774,7 @@ func (c *conversation) answer(ctx context.Context, s segment) {
 
 // respond speaks the answer to msgs. spoken holds the sentences of the answer that went
 // out in full, looked what was looked up for it.
-func (c *conversation) respond(ctx context.Context, msgs []chatMessage) (spoken []string, looked []chatMessage, firstAudio time.Time, err error) {
+func (c *conversation) respond(ctx context.Context, msgs []chatMessage, plain bool) (spoken []string, looked []chatMessage, firstAudio time.Time, err error) {
 	type piece struct {
 		text  string
 		aside bool
@@ -674,6 +793,8 @@ func (c *conversation) respond(ctx context.Context, msgs []chatMessage) (spoken 
 			sentence: func(s string) { say(piece{text: s}) },
 			aside:    func(s string) { say(piece{text: s, aside: true}) },
 			looked:   func(m []chatMessage) { found = append(found, m...) },
+			later:    c.startJob,
+			plain:    plain,
 		})
 		close(pieces)
 		thought <- err

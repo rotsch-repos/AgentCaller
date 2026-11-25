@@ -22,6 +22,9 @@ type callTool struct {
 	Parameters  json.RawMessage `json:"parameters"`
 	Command     string          `json:"command"`
 	Timeout     int             `json:"timeout_seconds"`
+	// Background marks work that takes longer than a pause in a conversation can: the
+	// agent says it is on it, keeps talking, and reports the result when it is there.
+	Background bool `json:"background"`
 }
 
 type toolSpec struct {
@@ -44,6 +47,23 @@ type toolCall struct {
 	} `json:"function"`
 }
 
+// What the model is told when work goes to the background, and when it comes back.
+const (
+	jobStarted = "Der Auftrag ist gestartet, aber noch nicht erledigt: Er läuft im Hintergrund und kann eine Minute oder länger dauern. " +
+		"Sag deinem Gegenüber in einem Satz, dass du dich darum kümmerst und dich meldest, sobald es fertig ist, " +
+		"und führe das Gespräch weiter. Das Ergebnis bekommst du als Meldung des Systems; bis dahin kennst du es nicht und rätst es nicht."
+	jobRefused = "Es laufen schon mehrere Aufträge im Hintergrund. Dieser wurde nicht gestartet; " +
+		"sag das deinem Gegenüber und warte auf ein Ergebnis."
+	jobDone = "(Meldung des Systems, nicht von deinem Gegenüber gesprochen: Der Auftrag %s %s von vorhin ist fertig. Ergebnis:\n%s\n" +
+		"Sag deinem Gegenüber jetzt in zwei bis vier Sätzen das Wesentliche davon, in eigenen Worten; Einzelheiten erst, wenn es nachfragt.)"
+	// keepPromise goes to a model that announced a lookup or an errand and called no tool.
+	keepPromise = "(Meldung des Systems, nicht von deinem Gegenüber gesprochen: Du hast eben angekündigt, etwas nachzusehen, " +
+		"weiterzugeben oder zu erledigen, aber kein Werkzeug aufgerufen. Ruf jetzt das passende Werkzeug auf, ohne etwas dazu zu sagen. " +
+		"War es keine solche Ankündigung, antworte nur mit dem Wort: nichts.)"
+	jobFailed = "(Meldung des Systems, nicht von deinem Gegenüber gesprochen: Der Auftrag %s %s von vorhin ist gescheitert: %s. " +
+		"Sag das deinem Gegenüber jetzt, ohne ein Ergebnis zu erfinden.)"
+)
+
 const (
 	defaultToolTimeout = 20 // seconds
 	maxToolOutput      = 6000
@@ -52,6 +72,12 @@ const (
 )
 
 var toolName = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+// promise matches an answer that announces a lookup or an errand: "ich schaue nach",
+// "ich kümmere mich darum", "ich gebe es weiter", "ich melde mich".
+var promise = regexp.MustCompile(`(?i)\b(schau\w*|seh\w*|sieh\w*|blätter\w*|such\w*|prüf\w*|les\w*|frag\w*|forsch\w*|hak\w*)\b[^.!?]*\bnach\b` +
+	`|\bnach(sehen|schauen|schlagen|lesen|fragen|forschen|prüfen)\b|\bkümmer\w* mich\b|\bmeld\w* mich\b|\bgeb\w*\b[^.!?]*\b(weiter|durch)\b` +
+	`|\b(trag\w*|schreib\w*|notier\w*|erledig\w*|veranlass\w*|leit\w*)\b[^.!?]*\b(ein|auf|weiter|ich|das)\b`)
 
 // loadTools reads a JSON array of tools.
 func loadTools(path string) ([]callTool, error) {
@@ -95,14 +121,18 @@ func toolSpecs(tools []callTool) []toolSpec {
 	return specs
 }
 
-// runTool runs the command of the tool the model asked for.
-func runTool(ctx context.Context, tools []callTool, call toolCall) (string, error) {
-	var tool *callTool
+func findTool(tools []callTool, name string) *callTool {
 	for i := range tools {
-		if tools[i].Name == call.Function.Name {
-			tool = &tools[i]
+		if tools[i].Name == name {
+			return &tools[i]
 		}
 	}
+	return nil
+}
+
+// runTool runs the command of the tool the model asked for.
+func runTool(ctx context.Context, tools []callTool, call toolCall) (string, error) {
+	tool := findTool(tools, call.Function.Name)
 	if tool == nil {
 		return "", fmt.Errorf("there is no tool %q", call.Function.Name)
 	}
@@ -141,6 +171,9 @@ func runTool(ctx context.Context, tools []callTool, call toolCall) (string, erro
 // something itself: silence on a telephone sounds like a dead line.
 func thinkWithTools(ctx context.Context, cfg LLMConfig, tools []callTool, wait string, msgs []chatMessage, out thinkSink, note func(string, map[string]any)) error {
 	specs := toolSpecs(tools)
+	if out.plain {
+		specs = nil
+	}
 	for round := 0; ; round++ {
 		if round == maxToolRounds {
 			specs = nil // enough looked up: answer with what is there
@@ -150,22 +183,53 @@ func thinkWithTools(ctx context.Context, cfg LLMConfig, tools []callTool, wait s
 			said = append(said, s)
 			out.sentence(s)
 		})
-		if err != nil || len(calls) == 0 {
+		if err != nil {
 			return err
 		}
-		if len(said) == 0 && round == 0 && wait != "" && out.aside != nil {
+		kept := false
+		if len(calls) == 0 {
+			// A model that says "ich schaue nach" and calls nothing leaves its peer waiting
+			// for an answer that never comes. It is asked once to do what it announced; what
+			// it says to that is not spoken.
+			text := strings.Join(said, " ")
+			if round != 0 || len(specs) == 0 || !promise.MatchString(text) {
+				return nil
+			}
+			nudged := append(append([]chatMessage(nil), msgs...),
+				chatMessage{Role: "assistant", Content: text}, chatMessage{Role: "user", Content: keepPromise})
+			calls, err = streamTurn(ctx, cfg, specs, nudged, func(string) {})
+			if err != nil || len(calls) == 0 {
+				return nil // the answer itself was spoken
+			}
+			msgs, said, kept = nudged, nil, true
+		}
+		later := func(call toolCall) bool {
+			t := findTool(tools, call.Function.Name)
+			return t != nil && t.Background && out.later != nil
+		}
+		waits := false
+		for _, call := range calls {
+			waits = waits || !later(call)
+		}
+		if waits && len(said) == 0 && round == 0 && !kept && wait != "" && out.aside != nil {
 			out.aside(wait)
 		}
 		begin := len(msgs)
 		// What was said before looking goes along: a model that does not see it says it again.
 		msgs = append(msgs, chatMessage{Role: "assistant", Content: strings.Join(said, " "), ToolCalls: calls})
 		for _, call := range calls {
+			if later(call) {
+				result := out.later(call)
+				note("lookup", map[string]any{"name": call.Function.Name, "arguments": call.Function.Arguments, "background": result == jobStarted, "reminded": kept})
+				msgs = append(msgs, chatMessage{Role: "tool", ToolCallID: call.ID, Content: result})
+				continue
+			}
 			start := time.Now()
 			result, err := runTool(ctx, tools, call)
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			fields := map[string]any{"name": call.Function.Name, "arguments": call.Function.Arguments, "ms": time.Since(start).Milliseconds()}
+			fields := map[string]any{"name": call.Function.Name, "arguments": call.Function.Arguments, "ms": time.Since(start).Milliseconds(), "reminded": kept}
 			if err != nil {
 				fields["error"] = err.Error()
 				result = "Das Nachschauen ist fehlgeschlagen: " + err.Error()
@@ -179,6 +243,9 @@ func thinkWithTools(ctx context.Context, cfg LLMConfig, tools []callTool, wait s
 			keep := append([]chatMessage(nil), msgs[begin:]...)
 			keep[0].Content = "" // those sentences are remembered with the answer
 			out.looked(keep)
+		}
+		if kept && !waits {
+			return nil // it already said that it is on it; the result is reported when it comes
 		}
 	}
 }

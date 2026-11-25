@@ -258,3 +258,104 @@ func TestThinkWithToolsBridgesSilentLookup(t *testing.T) {
 		t.Fatalf("answer %q, asides %q", answer, asides)
 	}
 }
+
+// The model says it will look and calls nothing. It is reminded once, silently; the
+// errand then starts in the background and nothing more is said in this answer.
+func TestThinkWithToolsKeepsItsPromise(t *testing.T) {
+	var requests []chatRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req chatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Error(err)
+		}
+		requests = append(requests, req)
+		w.Header().Set("Content-Type", "text/event-stream")
+		switch len(requests) {
+		case 1:
+			sse(w, `{"content":"Gleich schaue ich nach."}`)
+		case 2:
+			sse(w, `{"content":"Mache ich. "}`)
+			sse(w, `{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"auftrag","arguments":"{\"auftrag\":\"Chronik lesen\"}"}}]}`)
+		default:
+			t.Errorf("a third request: %+v", req.Messages)
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	tools := []callTool{{Name: "auftrag", Description: "Auftrag", Background: true, Command: "cat",
+		Parameters: json.RawMessage(`{"type":"object","properties":{"auftrag":{"type":"string"}}}`)}}
+	var said []string
+	var started []toolCall
+	var looked []chatMessage
+	var notes []map[string]any
+	sink := thinkSink{
+		sentence: func(s string) { said = append(said, s) },
+		aside:    func(s string) { said = append(said, "("+s+")") },
+		looked:   func(m []chatMessage) { looked = append(looked, m...) },
+		later:    func(c toolCall) string { started = append(started, c); return jobStarted },
+	}
+	cfg := LLMConfig{Endpoint: srv.URL, ModelID: "m", MaxTokens: 50}
+	msgs := []chatMessage{{Role: "system", Content: "P"}, {Role: "user", Content: "Was steht in der Chronik?"}}
+	if err := thinkWithTools(context.Background(), cfg, tools, "Moment.", msgs, sink,
+		func(event string, fields map[string]any) { notes = append(notes, fields) }); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"Gleich schaue ich nach."}; !reflect.DeepEqual(said, want) {
+		t.Fatalf("said %q, want %q", said, want)
+	}
+	if len(started) != 1 || started[0].Function.Arguments != `{"auftrag":"Chronik lesen"}` {
+		t.Fatalf("started %+v", started)
+	}
+	if len(requests) != 2 {
+		t.Fatalf("%d requests, want 2", len(requests))
+	}
+	reminder := requests[1].Messages
+	if n := len(reminder); n != 4 || reminder[2].Content != "Gleich schaue ich nach." || reminder[3].Content != keepPromise {
+		t.Fatalf("the reminder: %+v", reminder)
+	}
+	if len(looked) != 2 || len(looked[0].ToolCalls) != 1 || looked[1].Content != jobStarted {
+		t.Fatalf("the lookup to remember: %+v", looked)
+	}
+	if len(notes) != 1 || notes[0]["reminded"] != true || notes[0]["background"] != true {
+		t.Fatalf("notes %+v", notes)
+	}
+
+	// Chit-chat is no promise: nothing is asked a second time.
+	requests = nil
+	said = nil
+	srvTalk := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, chatRequest{})
+		w.Header().Set("Content-Type", "text/event-stream")
+		sse(w, `{"content":"Mir geht es gut, danke. Und dir?"}`)
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srvTalk.Close()
+	cfg.Endpoint = srvTalk.URL
+	if err := thinkWithTools(context.Background(), cfg, tools, "Moment.", msgs, sink, func(string, map[string]any) {}); err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 1 || len(said) != 1 {
+		t.Fatalf("%d requests and %q for chit-chat", len(requests), said)
+	}
+}
+
+func TestPromise(t *testing.T) {
+	for s, want := range map[string]bool{
+		"Gleich schaue ich nach.":                                     true,
+		"Sehr wohl, ich blättere gerade in Ihren Unterlagen nach.":    true,
+		"Ich gebe es an Johann durch, damit es in die Chronik kommt.": true,
+		"Ich lasse in Ihren Notizen nachsehen und melde mich.":        true,
+		"Ich kümmere mich darum.":                                     true,
+		"Das trage ich gleich ein.":                                   true,
+		"Mir geht es gut, danke, dass du fragst.":                     false,
+		"Das Matterhorn ist 4478 Meter hoch.":                         false,
+		"Tschüss, Roger. Gute Nacht.":                                 false,
+		"Ich mag es, wenn sich ein Gespräch ergibt.":                  false,
+		"Morgen wird es kalt, nach dem Mittag kommt Regen.":           false,
+	} {
+		if got := promise.MatchString(s); got != want {
+			t.Errorf("promise(%q) = %v, want %v", s, got, want)
+		}
+	}
+}

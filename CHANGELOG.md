@@ -72,6 +72,19 @@ All notable changes to AgentCaller (meowcaller before the fork), tracked per mod
     the model instead of ending the answer. The lookup and its result are kept in the
     conversation; the bridging phrase is spoken and not kept, because a model that
     reads it in its own past turns learns to say it instead of looking. Event `lookup`.
+  - **Errands in the background: `"background": true` on a tool.** A lookup that takes
+    half a minute cannot hold up an answer. Such a tool is started and the model is told
+    it is running; the conversation goes on, and the result comes back as a report the
+    agent speaks at the next quiet moment, behind any question that is waiting. At most
+    three at once. The report turn has no tools: in a rehearsal the model answered a
+    result about a "GPU watchdog" by looking up the machine's state and reported that
+    instead. Used here to hand tasks from the phone voice to an agent with tools and
+    notes (one agent turn: 9 to 34 s in four rehearsals). Events `lookup_done`, and
+    `reply` with `report`.
+  - **A promise without a call is followed up.** In 8 tries per question the model
+    announced a lookup and called nothing in up to 2 of 8. When an answer reads like
+    such an announcement and no tool was called, the model is asked once, unheard, to
+    call it (8 of 8 in four such cases; chit-chat answered "nothing" in 15 of 16).
   - **Phone rules rewritten.** The first version asked for one or two short sentences
     and for saying what the agent cannot do; on the call that came out as clipped
     answers and repeated disclaimers. The rules now ask for whole sentences, two to

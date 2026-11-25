@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -159,7 +160,8 @@ type fakeChain struct {
 	transcripts    []string
 	replies        [][]string
 	sentenceFrames int
-	stall          bool // the first answer never comes: think waits for its turn to be cancelled
+	stall          bool             // the first answer never comes: think waits for its turn to be cancelled
+	jobs           map[int]toolCall // question number -> background work the model asks for
 
 	heardBytes []int
 	asked      [][]chatMessage
@@ -188,7 +190,13 @@ func (f *fakeChain) chain() voiceChain {
 				reply = f.replies[n]
 			}
 			stall := f.stall && n == 0
+			job, hasJob := f.jobs[n]
 			f.mu.Unlock()
+			if hasJob {
+				if got := out.later(job); got != jobStarted {
+					return errors.New(got)
+				}
+			}
 			if stall {
 				<-ctx.Done()
 				return ctx.Err()
@@ -578,5 +586,40 @@ func TestConversationIgnoresLoneNoise(t *testing.T) {
 	}
 	if asked := chain.questions(); len(asked) != 1 || !reflect.DeepEqual(contents(asked[0]), []string{"system: P", "user: Hallo?"}) {
 		t.Fatalf("questions: %v", asked)
+	}
+}
+
+// Work that outlasts an answer: the agent says it is on it, and when the work comes back
+// it speaks up by itself, with the outcome in front of the model.
+func TestConversationReportsBackgroundWork(t *testing.T) {
+	var job toolCall
+	job.ID, job.Function.Name, job.Function.Arguments = "c1", "auftrag", `{"was":"nachsehen"}`
+	chain := &fakeChain{
+		transcripts:    []string{"Schau das bitte nach."},
+		replies:        [][]string{{"Ich kümmere mich darum."}, {"Es ist erledigt."}},
+		sentenceFrames: 5,
+		jobs:           map[int]toolCall{0: job},
+	}
+	cfg := converseConfig{llm: LLMConfig{Prompt: "PERSONA"}, tools: []callTool{{
+		Name: "auftrag", Description: "d", Background: true, Timeout: 5, Command: "sleep 0.3; cat; echo ' -> gefunden'",
+	}}}
+	l := startLine(t, cfg, chain.chain())
+	l.peerSays(15)
+	if e := l.await("reply", 1); e["text"] != "Ich kümmere mich darum." || e["report"] != nil {
+		t.Fatalf("first reply: %v", e)
+	}
+	if e := l.await("lookup_done", 1); e["name"] != "auftrag" || e["error"] != nil {
+		t.Fatalf("lookup_done: %v", e)
+	}
+	if e := l.await("reply", 2); e["text"] != "Es ist erledigt." || e["report"] != true {
+		t.Fatalf("report: %v", e)
+	}
+	asked := chain.questions()
+	if len(asked) != 2 {
+		t.Fatalf("%d questions to the model", len(asked))
+	}
+	last := asked[1][len(asked[1])-1]
+	if last.Role != "user" || !strings.Contains(last.Content, `{"was":"nachsehen"} -> gefunden`) || !strings.Contains(last.Content, "Meldung des Systems") {
+		t.Fatalf("the model was not shown the outcome: %+v", last)
 	}
 }

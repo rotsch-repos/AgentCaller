@@ -110,6 +110,17 @@ the silence. A lookup and its result stay in the conversation, so the next quest
 build on them. A command here runs with your rights on whatever the model sends it:
 give it read-only things to do, and treat what a web search returns as hearsay.
 
+Work that takes longer than a pause in a conversation gets `"background": true`: the
+command starts, the model is told that it is running and goes on talking, and when the
+result is there the agent reports it at the next quiet moment (never over its peer, and
+after any question that is waiting). At most three such errands run at once; a result
+that arrives after the call has ended is not spoken. This is how a fast voice model
+hands a task to a slower agent that has the tools and the memory: the command is that
+agent's command line. What the model hears on the phone can be misheard, so let the
+agent on the other end ask before it does anything that cannot be undone. A model that
+says "I'll look" and calls nothing is reminded once, silently, to do what it announced.
+Events: `lookup` (`background`, `reminded`), `lookup_done`, and `reply` with `report`.
+
 Measured that way on one machine (Whisper large-v3 and a 27B model on local GPUs), two
 runs of three turns each: the first sound of the answer left 0.9 s after the pause was
 reported in four turns and 1.4 and 1.9 s in the two where the recogniser was slow. The
