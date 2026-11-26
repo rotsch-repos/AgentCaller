@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -45,6 +46,35 @@ type chatMessage struct {
 	// ToolCalls and ToolCallID carry a lookup in a conversation (converse -tools).
 	ToolCalls  []toolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
+	// Image is a JPEG that goes with Content: what the peer's camera showed while it
+	// said this (converse -vision).
+	Image []byte `json:"-"`
+}
+
+// MarshalJSON writes a message with a picture the way OpenAI-compatible endpoints take
+// one: content as a list of parts, the picture inline. Without one nothing changes.
+func (m chatMessage) MarshalJSON() ([]byte, error) {
+	type plain chatMessage
+	if len(m.Image) == 0 {
+		return json.Marshal(plain(m))
+	}
+	type imageURL struct {
+		URL string `json:"url"`
+	}
+	type part struct {
+		Type     string    `json:"type"`
+		Text     string    `json:"text,omitempty"`
+		ImageURL *imageURL `json:"image_url,omitempty"`
+	}
+	// The words first: up to the picture the request then reads like the same turn
+	// without one, which is how it stands in the history afterwards.
+	return json.Marshal(struct {
+		Role    string `json:"role"`
+		Content []part `json:"content"`
+	}{m.Role, []part{
+		{Type: "text", Text: m.Content},
+		{Type: "image_url", ImageURL: &imageURL{URL: "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(m.Image)}},
+	}})
 }
 
 type chatRequest struct {

@@ -1,6 +1,9 @@
 package agentcaller
 
 import (
+	"sync"
+	"sync/atomic"
+
 	"github.com/rs/zerolog"
 	"go.mau.fi/whatsmeow/types"
 
@@ -171,8 +174,26 @@ type MediaPipeline struct {
 	warpMITagLen int
 	stream       *rtp.RtpStream
 	sendRoc      srtp.RocTracker
+	recvMu       sync.Mutex
 	recvRoc      srtp.RecvRocTracker
+	packetsSent  atomic.Uint32
+	octetsSent   atomic.Uint32
+	rtpTimestamp atomic.Uint32
 	log          zerolog.Logger
+}
+
+// RekeyRecv switches the receive keystream to the companion device that answered an
+// outgoing call. The send path remains keyed to this client's own LID.
+func (p *MediaPipeline) RekeyRecv(callKey []byte, peerJID string) error {
+	recvKeys, err := srtp.DeriveE2eKeys(callKey, rtp.FormatE2ESrtpParticipantID(peerJID))
+	if err != nil {
+		return err
+	}
+	p.recvMu.Lock()
+	p.recvKeys = recvKeys
+	p.recvRoc = srtp.RecvRocTracker{}
+	p.recvMu.Unlock()
+	return nil
 }
 
 // NewMediaPipeline derives both directions from the 32-byte callKey: send keys from
@@ -216,6 +237,9 @@ func (p *MediaPipeline) ProtectAudio(opusPayload []byte) ([]byte, error) {
 	}
 	packet = append(packet, encrypted...)
 	out := srtp.AppendWarpMITag(p.sendKeys.AuthKey[:], packet, roc, p.warpMITagLen)
+	p.packetsSent.Add(1)
+	p.octetsSent.Add(uint32(len(opusPayload)))
+	p.rtpTimestamp.Store(header.Timestamp)
 	p.log.Trace().Uint32("ssrc", header.Ssrc).Uint16("seq", header.SequenceNumber).Uint32("roc", roc).
 		Int("opus_bytes", len(opusPayload)).Int("packet_bytes", len(out)).Msg("protected audio frame")
 	return out, nil
@@ -235,7 +259,20 @@ func (p *MediaPipeline) ProtectRTP(header *rtp.RtpHeader, payload []byte) ([]byt
 		return nil, err
 	}
 	packet = append(packet, encrypted...)
-	return srtp.AppendWarpMITag(p.sendKeys.AuthKey[:], packet, roc, p.warpMITagLen), nil
+	out := srtp.AppendWarpMITag(p.sendKeys.AuthKey[:], packet, roc, p.warpMITagLen)
+	p.packetsSent.Add(1)
+	p.octetsSent.Add(uint32(len(payload)))
+	p.rtpTimestamp.Store(header.Timestamp)
+	return out, nil
+}
+
+// SenderStats snapshots the counters used by an RTCP Sender Report.
+func (p *MediaPipeline) SenderStats() rtp.RtcpSenderStats {
+	return rtp.RtcpSenderStats{
+		PacketsSent:  p.packetsSent.Load(),
+		OctetsSent:   p.octetsSent.Load(),
+		RtpTimestamp: p.rtpTimestamp.Load(),
+	}
 }
 
 // UnprotectAudio strips the WARP MI tag (not verified), parses the header, and
@@ -258,8 +295,10 @@ func (p *MediaPipeline) UnprotectAudio(packet []byte) (rtp.RtpHeader, []byte, bo
 		p.log.Debug().Uint32("ssrc", header.Ssrc).Int("header_bytes", headerLen).Msg("unprotect: header length invalid or no payload")
 		return rtp.RtpHeader{}, nil, false
 	}
+	p.recvMu.Lock()
 	roc := p.recvRoc.GuessRoc(header.SequenceNumber)
 	plain, err := srtp.CryptPayload(&p.recvKeys, header.Ssrc, header.SequenceNumber, roc, withoutTag[headerLen:])
+	p.recvMu.Unlock()
 	if err != nil {
 		p.log.Debug().Err(err).Uint32("ssrc", header.Ssrc).Uint16("seq", header.SequenceNumber).Uint32("roc", roc).Msg("unprotect: SRTP decrypt failed")
 		return rtp.RtpHeader{}, nil, false

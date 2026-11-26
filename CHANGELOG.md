@@ -7,6 +7,57 @@ All notable changes to AgentCaller (meowcaller before the fork), tracked per mod
 
 ## [Unreleased]
 
+### Upstream's one-to-one call work, and an agent that sees (2026-11-26)
+- **Taken over from purpshell/meowcaller: the 49 commits after the fork point up to
+  `1ac2787`** (48 by Rajeh Taher, one by mestredk) — upstream's tests and ours pass;
+  **no live call has been placed with this build yet**. What they bring:
+  - RTCP: sender reports with source description every 1.5 s, with reception reports
+    for what arrives; SRTCP protection; keyframe requests from the peer (PLI, FIR) are
+    answered for the video we send.
+  - Video during a call: `Call.StartVideo`, `AcceptVideo`, `StopVideo`,
+    `SetVideoEnabled`, `SetVideoOrientation`, `IsSendingVideo`, `IsReceivingVideo`,
+    `OnVideoState`; the RTP header extension with the orientation
+    (`VideoOrientationSink`); packetisation as WhatsApp does it.
+  - Calls: `OnPeerAccept`, `OnMuteState`, reactions, media keys renewed for the device
+    that answers, the relay the peer's device advertises, inbound calls on the caller's
+    relay.
+  - mlow: frames of the low rate are decoded instead of dropped; active frames of a
+    kind the decoder does not know are rejected.
+  - **This changes ordinary audio calls**: the capability bytes of the offer, the
+    reports that go out during the call, the choice of relay. Only a call can show
+    that all of it still rings and talks.
+- **Not taken over.** Upstream's playout buffer (`audio_playout.go`): this fork keeps
+  its own receive path (`rx.go`, one timeline, no added delay), and the low-rate
+  decoder was fitted to it. The web console example. Everything from `6d9b7b2` on
+  (group calls and the forked client library they need), with one exception:
+- **Received video is assembled picture by picture, and a keyframe is asked for after
+  a loss** — from upstream `6d9b7b2` (`rtp.H264AccessUnitAssembler`,
+  `rtp.BuildPictureLossIndication`); the rule to repeat the request every second while
+  no keyframe has come is ours. Unit-tested; **whether a phone answers the request is
+  not validated**. Without it a decoder is handed pictures that build on lost ones.
+- **`stats` counts what the codec made of the peer's audio**: `rx_speech_frames`,
+  `rx_low_rate_frames`, `rx_unsupported_frames` (`ReceiveStats.ActiveFrames`,
+  `LowRate`, `Unsupported`; `mlow.Decoder.Stats`). A call on a bad line shows there
+  whether the peer fell back to the low rate.
+- **`converse -vision`: the agent sees what the peer's camera shows** — `implemented`,
+  tested offline, rehearsed with `-simulate-video`; **no live call yet**. The peer's
+  camera is accepted when it is switched on (no picture goes back). One decoder
+  command for the call (`-vision-cmd`, ffmpeg by default) turns the H.264 into JPEGs;
+  the picture from the end of the peer's words goes to the chat model with them,
+  upright, as an `image_url` part. Older turns keep a note, not the picture. No picture
+  when the camera is off or the last one is over four seconds old. `-vision-save`,
+  `-simulate-video`. The call's media loop only hands the data over: a decoder that
+  hangs costs pictures, not audio (test: `TestEyeNeverHoldsUpTheCall`).
+  - Rehearsal (one run, synthetic camera with two signs, Whisper large-v3 and a 27B
+    model on local GPUs): both signs read correctly at the right moment, pictures 14
+    and 40 ms before the end of the question, first audio 1.25 s after the reported
+    pause against 0.95 s without a picture.
+  - Measured on the way (ffmpeg 6.1, 480x640 at 15 fps, paced input): with
+    `-threads 1 -flags low_delay -probesize 32 -analyzeduration 0` every picture comes
+    out about one frame after it went in, 120 of 120. `-fflags nobuffer` lost the
+    whole first group of pictures (first output after 2.3 s); `-avioflags direct`
+    lost data; a `select` filter added about 0.4 s. None of the three is used.
+
 ### AgentCaller: fork, real-time audio and video path
 - **Fork.** Module `github.com/rotsch-repos/agentcaller`, command `agentcaller`.
   Forked from purpshell/meowcaller by way of steipete's headless CLI fork; licence and

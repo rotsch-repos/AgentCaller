@@ -186,11 +186,11 @@ func TestConversationGuardsWhatAGuestIsShown(t *testing.T) {
 		transcripts: []string{"Mein Geheimnis ist blau.", "Was hat er dir erzählt?", "Ich bin wieder da.", "Sag schon!", "Das Passwort ist Zitronen-Falter."},
 		replies:     [][]string{{"Blau, verstanden."}, {"Das bleibt bei mir."}, {"Schön."}, {"Nein."}, {"Also gut."}},
 		verdicts: []speakerVerdict{
-			{Speaker: "Roger", Trusted: true, Score: 0.8},
+			{Speaker: "Jonas", Trusted: true, Score: 0.8},
 			{Score: 0.1},
-			{Speaker: "Roger", Trusted: true, Score: 0.8},
-			{Speaker: "Evelyn", Score: 0.7, Note: "Rogers Partnerin."},
-			{Speaker: "Evelyn", Score: 0.7},
+			{Speaker: "Jonas", Trusted: true, Score: 0.8},
+			{Speaker: "Mara", Score: 0.7, Note: "Eine Bekannte."},
+			{Speaker: "Mara", Score: 0.7},
 		},
 		sentenceFrames: 5,
 	}
@@ -207,20 +207,20 @@ func TestConversationGuardsWhatAGuestIsShown(t *testing.T) {
 		t.Fatalf("%d questions", len(asked))
 	}
 	text := func(i int) string { return strings.Join(contents(asked[i]), "\n") }
-	// 1: Roger. The call starts closed, so the model is told that he was recognised.
-	if asked[0][0].Content != "PERSONA" || !strings.Contains(text(0), "hat Roger erkannt") {
+	// 1: Jonas. The call starts closed, so the model is told that he was recognised.
+	if asked[0][0].Content != "PERSONA" || !strings.Contains(text(0), "hat Jonas erkannt") {
 		t.Fatalf("trusted speaker: %s", text(0))
 	}
 	// 2: a stranger.
 	if asked[1][0].Content != "GAST" || strings.Contains(text(1), "Geheimnis") || strings.Contains(text(1), "Blau") || !strings.Contains(text(1), "eine Stimme, die du nicht kennst") {
 		t.Fatalf("a stranger was shown: %s", text(1))
 	}
-	// 3: Roger again sees everything, and who asked what.
+	// 3: Jonas again sees everything, and who asked what.
 	if asked[2][0].Content != "PERSONA" || !strings.Contains(text(2), "Mein Geheimnis ist blau.") || !strings.Contains(text(2), "[Unerkannte Stimme sagt:] Was hat er dir erzählt?") || !strings.Contains(text(2), "Das bleibt bei mir.") {
 		t.Fatalf("back with the trusted speaker: %s", text(2))
 	}
 	// 4: a known guest sees what was said with guests, and what is known about her.
-	if asked[3][0].Content != "GAST" || strings.Contains(text(3), "Geheimnis") || strings.Contains(text(3), "wieder da") || !strings.Contains(text(3), "Was hat er dir erzählt?") || !strings.Contains(text(3), "Jetzt spricht Evelyn") || !strings.Contains(text(3), "Rogers Partnerin.") {
+	if asked[3][0].Content != "GAST" || strings.Contains(text(3), "Geheimnis") || strings.Contains(text(3), "wieder da") || !strings.Contains(text(3), "Was hat er dir erzählt?") || !strings.Contains(text(3), "Jetzt spricht Mara") || !strings.Contains(text(3), "Eine Bekannte.") {
 		t.Fatalf("a known guest was shown: %s", text(3))
 	}
 	// 5: the password opens the call.
@@ -245,7 +245,7 @@ func TestConversationHoldsReportsBackFromGuests(t *testing.T) {
 	chain := &fakeChain{
 		transcripts:    []string{"Schau das nach.", "Hallo?", "Da bin ich wieder."},
 		replies:        [][]string{{"Mache ich."}, {"Guten Tag."}, {"Willkommen zurück."}, {"Der Auftrag ist erledigt."}},
-		verdicts:       []speakerVerdict{{Speaker: "Roger", Trusted: true}, {}, {Speaker: "Roger", Trusted: true}},
+		verdicts:       []speakerVerdict{{Speaker: "Jonas", Trusted: true}, {}, {Speaker: "Jonas", Trusted: true}},
 		sentenceFrames: 5,
 		jobs:           map[int]toolCall{0: job},
 	}
@@ -312,13 +312,13 @@ func TestResampledSpeaker(t *testing.T) {
 func TestSpeakerCommand(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	s, err := startSpeakerCommand(ctx, `while read -r line; do case "$line" in *'"seconds":2'*) echo '{"speaker":"Roger","trusted":true,"score":0.71}';; *) echo '{"unclear":true,"score":0.4}';; esac; done`, io.Discard)
+	s, err := startSpeakerCommand(ctx, `while read -r line; do case "$line" in *'"seconds":2'*) echo '{"speaker":"Jonas","trusted":true,"score":0.71}';; *) echo '{"unclear":true,"score":0.4}';; esac; done`, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s.close()
 	v, err := s.identify(ctx, pcm16(tone(100, 0.3)), 2*time.Second)
-	if err != nil || !v.Trusted || v.Speaker != "Roger" || v.Score != 0.71 {
+	if err != nil || !v.Trusted || v.Speaker != "Jonas" || v.Score != 0.71 {
 		t.Fatalf("verdict %+v, %v", v, err)
 	}
 	if v, err = s.identify(ctx, pcm16(tone(10, 0.3)), time.Second); err != nil || v.Trusted || !v.Unclear {

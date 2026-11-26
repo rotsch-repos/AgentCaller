@@ -135,6 +135,21 @@ and `-record` gives you the agent's side to listen to. It does not exercise the 
 the codec, or echo: on a real call the agent's own voice coming back through the peer's
 loudspeaker may trigger barge-in. That has not been tried yet; `-no-barge-in` is the way out.
 
+Seeing (`-vision`): when the peer switches its camera on, the call accepts it without
+sending video back. The H.264 goes to `-vision-cmd` (run by `sh -c`, started with the first
+picture data, one process for the call; default: ffmpeg to JPEGs of at most 768 pixels). The
+picture from the end of the peer's words is attached to that turn as an `image_url` part
+(base64 JPEG), turned upright; the history keeps a note in its place. No picture is sent
+when the camera is off or the last one is more than four seconds old. `-vision-save DIR`
+writes each picture the model was shown (`seen-001.jpg`, ...). `-simulate-video file.h264`
+(with `-simulate`, at `-simulate-video-fps`, default 15) plays a file as the peer's camera.
+Events: `video_state {active, upgrade, orientation, state}`, `video_accepted`, `video_error`,
+`seeing {on, width, height, turns}`, `vision_error {error, gave_up}`; `reply` gains
+`picture_bytes`, `picture_ms` and, with `-vision-save`, `picture`. A decoder that ends is
+started again with the next picture data; one that shows nothing three times in a row is left
+alone and the call goes on without pictures. Not yet seen on a live call.
+
 Flags: `-store`, `-answer`, `-answer-timeout`, `-max-duration`, `-end-silence`, `-events`,
 `-persona FILE`, `-greeting TEXT`, `-llm-url`, `-llm-model`, `-max-tokens`, `-stt-url`,
-`-stt-model`, `-stt-language`, `-tts-cmd`, `-tts-rate`, `-no-barge-in`, `-simulate`, `-record`.
+`-stt-model`, `-stt-language`, `-tts-cmd`, `-tts-rate`, `-no-barge-in`, `-simulate`, `-record`,
+`-vision`, `-vision-cmd`, `-vision-save`, `-simulate-video`, `-simulate-video-fps`.

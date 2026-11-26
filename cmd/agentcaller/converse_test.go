@@ -263,6 +263,12 @@ type testLine struct {
 
 func startLine(t *testing.T, cfg converseConfig, chain voiceChain) *testLine {
 	t.Helper()
+	return startLineWith(t, cfg, chain, nil)
+}
+
+// startLineWith is startLine with a last word on the conversation before it runs.
+func startLineWith(t *testing.T, cfg converseConfig, chain voiceChain, prepare func(*conversation)) *testLine {
+	t.Helper()
 	cfg.call.inRate, cfg.call.endSilence, cfg.call.answerTimeout = agentcaller.SampleRate, 300*time.Millisecond, time.Second
 	cfg.call.bargeIn = !cfg.noBargeIn
 	l := &testLine{t: t, call: newFakeDuplexCall(agentcaller.CallPhaseActive), result: make(chan error, 1)}
@@ -270,6 +276,9 @@ func startLine(t *testing.T, cfg converseConfig, chain voiceChain) *testLine {
 	l.cancel = cancel
 	t.Cleanup(cancel)
 	c := newConversation(cfg, chain, &l.events)
+	if prepare != nil {
+		prepare(c)
+	}
 	go func() { l.result <- c.run(ctx, l.call) }()
 	src := l.call.source(t)
 	l.call.mu.Lock()
