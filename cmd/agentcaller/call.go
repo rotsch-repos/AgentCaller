@@ -38,6 +38,7 @@ type callConfig struct {
 	maxBuffer     time.Duration
 	conceal       bool
 	bargeIn       bool
+	bargeAfter    time.Duration // how long the peer must have been talking before it counts as an interruption
 	endSilence    time.Duration
 	answerTimeout time.Duration
 	maxDuration   time.Duration
@@ -90,6 +91,7 @@ func parseCallArgs(args []string, stderr io.Writer) (callConfig, error) {
 	flags.DurationVar(&cfg.maxBuffer, "max-buffer", 0, "bound the queued outgoing audio, dropping the oldest (for a live microphone); 0 queues everything (for speech synthesis)")
 	flags.BoolVar(&cfg.conceal, "conceal", false, "fill lost packets with a synthesised continuation instead of silence (for human listeners, worse for speech recognition)")
 	flags.BoolVar(&cfg.bargeIn, "barge-in", false, "discard queued outgoing audio the moment the peer starts to speak")
+	flags.DurationVar(&cfg.bargeAfter, "barge-in-after", defaultBargeAfter, "how long the peer must have been speaking before -barge-in discards anything: a cough or an echo is shorter")
 	flags.DurationVar(&cfg.endSilence, "end-silence", 700*time.Millisecond, "silence after speech that produces a speech_end event")
 	flags.DurationVar(&cfg.answerTimeout, "answer-timeout", defaultAnswerTimeout, "maximum wait for the call to be answered (or to arrive, with -answer); 0 disables")
 	flags.DurationVar(&cfg.maxDuration, "max-duration", 0, "hang up after this long; 0 disables")
@@ -159,13 +161,27 @@ type speechGate struct {
 	quiet      int
 	speaking   bool
 	startFrame int
+	// holdFrames is how long speech must have lasted before it counts as an interruption;
+	// sustained is true on the one frame where it gets there. A cough, a click or the
+	// agent's own echo opens the gate for three or four frames: enough to listen to,
+	// not enough to cut the agent off in the middle of a sentence.
+	holdFrames int
+	sustained  bool
 }
 
-func newSpeechGate(endSilence time.Duration) *speechGate {
+// defaultBargeAfter: on real calls the sounds that were not speech (line noise, the
+// agent's own echo) lasted 120 to 360 ms, the shortest real interjections 420 to 600 ms.
+const defaultBargeAfter = 480 * time.Millisecond
+
+func newSpeechGate(endSilence, bargeAfter time.Duration) *speechGate {
 	cfg := defaultVADConfig()
+	if bargeAfter <= 0 {
+		bargeAfter = defaultBargeAfter
+	}
 	return &speechGate{
 		cfg:        cfg,
-		openFrames: 2, // 120 ms: one loud frame can be a click
+		openFrames: 3, // 180 ms: a click on a real call lasts up to two frames and must not count as speech
+		holdFrames: max(3, int((bargeAfter+59*time.Millisecond)/(60*time.Millisecond))),
 		endFrames:  max(1, int((endSilence+59*time.Millisecond)/(60*time.Millisecond))),
 		noise:      cfg.NoiseFloorInit,
 	}
@@ -183,18 +199,22 @@ func (g *speechGate) feed(frame []float32) (started, ended bool, at, length time
 	}
 	idx := g.frame
 	g.frame++
+	g.sustained = false
 	switch {
 	case !g.speaking && voiced:
 		g.streak++
 		if g.streak >= g.openFrames {
 			g.speaking, g.quiet = true, 0
 			g.startFrame = idx - g.streak + 1
+			g.sustained = g.streak == g.holdFrames || g.holdFrames <= g.openFrames
 			return true, false, time.Duration(g.startFrame) * tick, 0
 		}
 	case !g.speaking:
 		g.streak = 0
 	case voiced:
 		g.quiet = 0
+		g.streak++
+		g.sustained = g.streak == g.holdFrames
 	default:
 		g.quiet++
 		if g.quiet >= g.endFrames {
@@ -342,7 +362,7 @@ func newDuplex(cfg callConfig, events *eventLog, out io.Writer) *duplex {
 		cfg:    cfg,
 		events: events,
 		live:   agentcaller.NewLiveSource(agentcaller.LiveConfig{Rate: cfg.inRate, MaxBuffered: cfg.maxBuffer}),
-		gate:   newSpeechGate(cfg.endSilence),
+		gate:   newSpeechGate(cfg.endSilence, cfg.bargeAfter),
 		ready:  make(chan struct{}),
 	}
 	if out != nil {
@@ -407,13 +427,17 @@ func (d *duplex) take(frame []float32) {
 	switch {
 	case started:
 		d.events.emit("speech_start", map[string]any{"at": at.Seconds()})
+	case ended:
+		d.events.emit("speech_end", map[string]any{"at": at.Seconds(), "duration": length.Seconds()})
+	}
+	if d.gate.sustained {
+		// Only now is it an interruption: see speechGate.holdFrames.
+		d.events.emit("speech_sustained", nil)
 		if d.cfg.bargeIn {
 			if cut := d.live.Flush(); cut > 0 {
 				d.events.emit("flushed", map[string]any{"cause": "barge-in", "ms": cut.Milliseconds()})
 			}
 		}
-	case ended:
-		d.events.emit("speech_end", map[string]any{"at": at.Seconds(), "duration": length.Seconds()})
 	}
 }
 

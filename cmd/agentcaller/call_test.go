@@ -54,7 +54,7 @@ func tone(frames int, amp float64) []float32 {
 }
 
 func TestSpeechGateSynthetic(t *testing.T) {
-	g := newSpeechGate(300 * time.Millisecond)
+	g := newSpeechGate(300*time.Millisecond, 0)
 	var got []string
 	feed := func(samples []float32) {
 		for i := 0; i+frameSamples <= len(samples); i += frameSamples {
@@ -92,7 +92,7 @@ func TestSpeechGateOnCallFixture(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer src.Close()
-	g := newSpeechGate(700 * time.Millisecond)
+	g := newSpeechGate(700*time.Millisecond, 0)
 	var starts []time.Duration
 	for {
 		frame, err := src.ReadFrame()
@@ -352,12 +352,14 @@ func TestDuplexBargeInAndControl(t *testing.T) {
 			t.Fatalf("frame %d is not the queued audio", i)
 		}
 	}
-	speech := tone(2, 0.2)
-	_ = d.WriteFrame(speech[:frameSamples])
-	if d.live.Buffered() == 0 {
-		t.Fatal("a single loud frame already cut the agent off")
+	speech := tone(8, 0.2)
+	for i := 0; i < 7; i++ {
+		_ = d.WriteFrame(speech[i*frameSamples : (i+1)*frameSamples])
 	}
-	_ = d.WriteFrame(speech[frameSamples:])
+	if d.live.Buffered() == 0 {
+		t.Fatal("seven loud frames, a cough or an echo, already cut the agent off")
+	}
+	_ = d.WriteFrame(speech[7*frameSamples:])
 	if d.live.Buffered() != 0 {
 		t.Fatalf("%v still queued after the peer started to speak", d.live.Buffered())
 	}
@@ -619,5 +621,35 @@ func TestAnnounceCall(t *testing.T) {
 	}
 	if cfg, err := parseCallArgs([]string{"-announce", "Alice ruft an", "+41790000000"}, io.Discard); err != nil || cfg.announce != "Alice ruft an" {
 		t.Fatalf("config %+v, %v", cfg, err)
+	}
+}
+
+// Speech opens after 180 ms but counts as an interruption only once it has lasted:
+// exactly one frame of a long enough utterance reports it, a short one never does.
+func TestSpeechGateSustained(t *testing.T) {
+	count := func(frames int, bargeAfter time.Duration) (starts, sustained, at int) {
+		g := newSpeechGate(300*time.Millisecond, bargeAfter)
+		samples := append(make([]float32, 10*frameSamples), tone(frames, 0.2)...)
+		samples = append(samples, make([]float32, 10*frameSamples)...)
+		for i := 0; i+frameSamples <= len(samples); i += frameSamples {
+			started, _, _, _ := g.feed(samples[i : i+frameSamples])
+			if started {
+				starts++
+			}
+			if g.sustained {
+				sustained++
+				at = i/frameSamples - 10 + 1
+			}
+		}
+		return
+	}
+	if starts, sustained, _ := count(6, 0); starts != 1 || sustained != 0 {
+		t.Fatalf("360 ms: %d starts, %d interruptions, want 1 and 0", starts, sustained)
+	}
+	if starts, sustained, at := count(20, 0); starts != 1 || sustained != 1 || at != 8 {
+		t.Fatalf("1.2 s: %d starts, %d interruptions at frame %d, want 1, 1 and frame 8", starts, sustained, at)
+	}
+	if _, sustained, at := count(20, 180*time.Millisecond); sustained != 1 || at != 3 {
+		t.Fatalf("with 180 ms: %d interruptions at frame %d, want 1 at frame 3", sustained, at)
 	}
 }

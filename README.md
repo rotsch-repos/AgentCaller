@@ -25,7 +25,7 @@ around the codec so that a call feels immediate. See [Credits](#credits).
 | Outbound audio call, send only (`notify`) | live-tested as `meowcaller notify`; not re-run since the fork (the encoder output is bit-identical) |
 | One question, one answer (`talk`) | built and replay-tested; no live call yet |
 | Two-way pipe (`call`), speech events, barge-in | tested offline against a simulated call; **no live call yet** |
-| Spoken conversation (`converse`): recognition, chat model, speech command | tested offline, and end to end with `-simulate` against real services. **One live call so far, and it failed** after the first answer (see the changelog); the fixes for it are not yet confirmed on a call |
+| Spoken conversation (`converse`): recognition, chat model, speech command | tested offline, and end to end with `-simulate` against real services. After a failed first call, **two live calls on 2026-11-25 held a conversation** over several minutes (see the changelog). A later call that day ran 17 minutes with lookups, background errands and the 480 ms interruption rule. Several voices (`-voices`), the speaker check (`-speakers`) and the warm start came after it and are **not yet confirmed on a call** |
 | New receive path (ordering, loss handling) | tested offline with simulated loss and reordering; **not yet on real traffic** |
 | Video send and receive | tested offline against ffmpeg; **never validated in a live call**, as upstream |
 
@@ -87,13 +87,94 @@ agentcaller converse \
 ```
 
 The answer is spoken sentence by sentence while the model is still writing, the agent
-stops when the person starts to talk, a pause that turns out not to be the end is
+stops when the person talks into it, a pause that turns out not to be the end is
 merged with what follows, and a goodbye ends the call. To hear the whole chain without
-a phone, let a recording play the caller:
+a phone, let a recording play the caller.
+
+Three settings came out of real calls. A sound has to last 480 ms before the agent stops
+for it (`-barge-in-after`): line noise and the echo of the agent's own voice lasted 120 to
+360 ms and cut answers off in the middle of a sentence; they are still listened to, and
+thrown away when they turn out to be nothing. `-greeting-delay 1500ms` waits for the
+phone to reach the ear, and a greeting that a noise did cut off is said again. `-hangup`
+says when the agent ends the call: after a `goodbye` (default), only when `asked` to hang
+up, or `never`. A noise once came out of the recogniser as "Bye." and ended a call.
+The outcome of a background errand is owed until it has been spoken: if the person talks
+over the report, it goes along with the next answer.
+
 
 ```sh
 agentcaller converse -simulate caller.wav -record agent.wav -tts-cmd "..." -events events.jsonl
 ```
+
+The agent can look things up while it talks. `-tools tools.json` names commands the
+chat model may call (it must support OpenAI-style tool calls):
+
+```json
+[{"name": "weather", "description": "Current weather and forecast for a place.",
+  "parameters": {"type": "object", "properties": {"place": {"type": "string"}}},
+  "command": "/usr/local/bin/weather-lookup", "timeout_seconds": 15}]
+```
+
+The command gets the arguments as JSON on stdin and answers with text on stdout. If the
+model starts a lookup without a word, `-tools-wait "One moment."` is spoken to bridge
+the silence. A lookup and its result stay in the conversation, so the next question can
+build on them. A command here runs with your rights on whatever the model sends it:
+give it read-only things to do, and treat what a web search returns as hearsay.
+
+Work that takes longer than a pause in a conversation gets `"background": true`: the
+command starts, the model is told that it is running and goes on talking, and when the
+result is there the agent reports it at the next quiet moment (never over its peer, and
+after any question that is waiting). At most three such errands run at once; a result
+that arrives after the call has ended is not spoken. This is how a fast voice model
+hands a task to a slower agent that has the tools and the memory: the command is that
+agent's command line. What the model hears on the phone can be misheard, so let the
+agent on the other end ask before it does anything that cannot be undone. A model that
+says "I'll look" and calls nothing is reminded once, silently, to do what it announced.
+Events: `lookup` (`background`, `reminded`), `lookup_done`, and `reply` with `report`.
+
+Several characters can hold the same call. `-voices voices.json` replaces `-persona`,
+`-tts-cmd` and `-tts-rate`; `-voice Name` says who starts:
+
+```json
+[{"name": "Alice", "about": "the one to talk and think with", "persona": "alice.md",
+  "tts_cmd": "alice-voice --pcm 16000", "tts_rate": 16000, "tools_wait": "One moment."},
+ {"name": "Johann", "about": "the butler, for getting things done", "persona": "johann.md",
+  "tts_cmd": "johann-voice --pcm", "tts_rate": 24000}]
+```
+
+The model gets a tool `verbinden` ("put through"): when the person asks for the other
+one, the voice that is speaking finishes its sentence, and the next answer comes from
+the other persona in the other voice. The conversation and everything that was looked
+up stay; the one that takes over is told that the answers so far were not its own.
+Tool commands find the name of the voice that is speaking in `AGENTCALLER_VOICE`.
+Events: `handover` (`from`, `to`); `reply` carries `voice`.
+
+The agent can be made to mind who is speaking. `-speakers speakers.json` names a command
+that runs for the length of the call:
+
+```json
+{"command": "/usr/local/bin/speaker-check", "guest_persona": "guest.md", "password": "..."}
+```
+
+For every stretch of speech it gets one line `{"wav": "/path.wav", "seconds": 2.4}` and
+answers one line, for instance `{"speaker": "Sam", "trusted": true, "score": 0.83}`;
+`"unclear": true` when it cannot tell, `"short": true` when there was too little to
+hear, `"note"` for what is known about a guest. It runs next to the speech recognition
+and costs the answer no time. The call starts locked. Until a trusted voice is heard,
+the model works from the guest persona and sees nothing of what was said with trusted
+speakers; it is offered only the tools marked `"guests": true`, never the handover, and
+outcomes of errands wait until the trusted speaker is back. This is done by what the
+model is sent, not by asking it to keep quiet: it cannot tell what it is not shown.
+A check that fails or times out counts as a guest. The password, spoken, unlocks the
+call for whoever says it. It is matched in the transcript (case, hyphens and spaces
+aside) and replaced by `[Passwort]` before the model or the event log see the sentence,
+so the model cannot give it away; the file must be readable by its owner alone.
+A voice profile tells who is probably speaking. It is not a lock: a recording or a
+cloned voice passes it. Events: `speaker` (`trusted`, `guest`, `score`, `speaker`).
+
+Before the first word, the prompts and tool lists of the call are sent to the chat
+endpoint once with a one-token answer, so that a server with a prefix cache has read
+the persona by the time the person speaks (event `warmed` with `ms`).
 
 Measured that way on one machine (Whisper large-v3 and a 27B model on local GPUs), two
 runs of three turns each: the first sound of the answer left 0.9 s after the pause was
@@ -138,10 +219,12 @@ it is not, and the default here serves the recogniser:
 `small`.) `-conceal`, or `Call.ConcealLosses(true)`, turns the continuation on
 for calls a person listens to.
 
-**Interrupting.** `-barge-in` drops the agent's queued audio 120 ms after the
-person starts to speak. It listens to the incoming audio only, so the echo of
-the agent's own voice from a phone on speaker can trigger it. That needs a live
-test before it is trusted; until then it is opt-in.
+**Interrupting.** `-barge-in` drops the agent's queued audio once the person has
+been speaking for `-barge-in-after` (480 ms; the event is `speech_sustained`).
+`speech_start` still comes after 180 ms, so nothing is lost for the recogniser. It
+listens to the incoming audio only: on live calls the echo of the agent's own voice and
+line noise opened it for 120 to 360 ms, which is why the first version, cutting at
+`speech_start`, stopped the agent in the middle of sentences. Still opt-in for `call`.
 
 **Input quality.** WAV, MP3 and the `-in` stream are converted to 16 kHz with a
 band-limited polyphase resampler (everything above 8.2 kHz is down by 86 dB or

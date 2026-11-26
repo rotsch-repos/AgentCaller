@@ -42,6 +42,9 @@ func defaultLLMConfig() LLMConfig {
 type chatMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
+	// ToolCalls and ToolCallID carry a lookup in a conversation (converse -tools).
+	ToolCalls  []toolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
 }
 
 type chatRequest struct {
@@ -50,6 +53,7 @@ type chatRequest struct {
 	MaxTokens   int           `json:"max_tokens"`
 	Temperature float32       `json:"temperature"`
 	Stream      bool          `json:"stream"`
+	Tools       []toolSpec    `json:"tools,omitempty"`
 	// ChatTemplateKwargs disables the reasoning trace on thinking models
 	// (Qwen3 "abliterated" builds put every token into `reasoning` and leave
 	// `content` null otherwise).
