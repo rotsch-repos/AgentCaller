@@ -134,6 +134,18 @@ All notable changes to AgentCaller (meowcaller before the fork), tracked per mod
   - **Goodbye** also understands "dann hängen wir auf" and "leg bitte auf".
   - `-simulate` plays a polite caller: at each pause in the recording it waits until
     the agent has finished, up to 30 s.
+- **The one who picks up speaks first (2026-11-26)** — `implemented`, tested offline
+  (scripted call) and rehearsed with `-simulate` against a recorded "Hallo."; not yet
+  heard on a live call. On real calls the person said "Hallo" into the greeting or
+  waited for it. `-greeting-after-hello 6s` holds the greeting back until the first
+  word (up to four words: "Hallo?", "Ja, bitte?", a name) and says it at once, without
+  asking the model; the word and the greeting go into the history together. Anything
+  longer is answered like any question, a click is not a first word, and whoever says
+  nothing is greeted when the wait is over. The greeting is spoken ahead while it
+  rings (event `greeting_ready`): in the rehearsal its first audio left 122 ms after
+  the pause was reported (the transcription), where speaking it then would have added
+  the 500 ms the speech command took. `-simulate` lets the recording speak first when
+  the flag is set.
 
 ### cmd/meowcaller — interactive voice menu `talk` (VAD → STT → LLM → TTS) — `implemented`
 - Added the `meowcaller talk` subcommand: a state machine that plays a fixed

@@ -95,7 +95,10 @@ Three settings came out of real calls. A sound has to last 480 ms before the age
 for it (`-barge-in-after`): line noise and the echo of the agent's own voice lasted 120 to
 360 ms and cut answers off in the middle of a sentence; they are still listened to, and
 thrown away when they turn out to be nothing. `-greeting-delay 1500ms` waits for the
-phone to reach the ear, and a greeting that a noise did cut off is said again. `-hangup`
+phone to reach the ear, and a greeting that a noise did cut off is said again. Or let the
+one who picks up speak first: with `-greeting-after-hello 6s` the greeting follows their
+"Hallo?" at once (it is spoken ahead while it rings), and comes by itself after six
+seconds of silence. `-hangup`
 says when the agent ends the call: after a `goodbye` (default), only when `asked` to hang
 up, or `never`. A noise once came out of the recogniser as "Bye." and ended a call.
 The outcome of a background errand is owed until it has been spoken: if the person talks
