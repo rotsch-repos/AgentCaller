@@ -65,6 +65,21 @@ All notable changes to AgentCaller (meowcaller before the fork), tracked per mod
   both are what the fix above assumed. `-announce` delivered its message.
   What these calls showed, and what changed after them (**none of it on a call yet**,
   all of it in the tests and in `-simulate` runs against real services):
+  - **Several voices in one call: `converse -voices file.json`, `-voice Name`.** Each
+    voice has its persona and its speech command; the model gets a tool `verbinden` and
+    hands the call over when the person asks for the other one. The handover follows the
+    sentence that announces it; the conversation and the lookups stay. Voices with
+    different sample rates are brought to one. Events `handover`, `reply.voice`.
+    Tested with fakes and with `-simulate` against real services; **no live call yet**.
+  - **Who is speaking: `converse -speakers file.json`.** A command judges every stretch
+    of speech while it is transcribed. The call starts locked; a guest gets the guest
+    persona, none of the conversation held with trusted speakers, only tools marked
+    `"guests": true`, and no outcomes of errands. A spoken password unlocks the call and
+    is taken out of the transcript before the model and the event log see it. A failed
+    check counts as a guest. Event `speaker`. Tested with fakes and with `-simulate`;
+    **no live call yet**. The speaker models themselves are not part of this repository.
+  - **Warm start.** The prompts of the call are sent once with a one-token answer before
+    the first word, for servers with a prefix cache. Event `warmed`.
   - **Lookups: `converse -tools file.json`, `-tools-wait "text"`.** The model answered
     a weather question with numbers it had made up. It can now call commands named in
     a JSON file (arguments as JSON on stdin, text on stdout, a timeout each, output

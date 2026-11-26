@@ -25,6 +25,11 @@ type callTool struct {
 	// Background marks work that takes longer than a pause in a conversation can: the
 	// agent says it is on it, keeps talking, and reports the result when it is there.
 	Background bool `json:"background"`
+	// Guests marks what may also be used while somebody is on the line whom the speaker
+	// check does not trust (converse -speakers): nothing that reads or changes private things.
+	Guests bool `json:"guests"`
+
+	handover bool // not a command: the voice that speaks hands the call to another one
 }
 
 type toolSpec struct {
@@ -82,7 +87,8 @@ var toolName = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 // "ich kümmere mich darum", "ich gebe es weiter", "ich melde mich".
 var promise = regexp.MustCompile(`(?i)\b(schau\w*|seh\w*|sieh\w*|blätter\w*|such\w*|prüf\w*|les\w*|frag\w*|forsch\w*|hak\w*)\b[^.!?]*\bnach\b` +
 	`|\bnach(sehen|schauen|schlagen|lesen|fragen|forschen|prüfen)\b|\bkümmer\w* mich\b|\bmeld\w* mich\b|\bgeb\w*\b[^.!?]*\b(weiter|durch)\b` +
-	`|\b(trag\w*|schreib\w*|notier\w*|erledig\w*|veranlass\w*|leit\w*)\b[^.!?]*\b(ein|auf|weiter|ich|das)\b`)
+	`|\b(trag\w*|schreib\w*|notier\w*|erledig\w*|veranlass\w*|leit\w*)\b[^.!?]*\b(ein|auf|weiter|ich|das)\b` +
+	`|\bverbind\w*\b[^.!?]*\bmit\b|\b(stell\w*|reich\w*)\b[^.!?]*\b(durch|weiter)\b`)
 
 // loadTools reads a JSON array of tools.
 func loadTools(path string) ([]callTool, error) {
@@ -102,6 +108,8 @@ func loadTools(path string) ([]callTool, error) {
 			return nil, fmt.Errorf("%s: tool %d: name %q must be 1-64 letters, digits, _ or -", path, i+1, t.Name)
 		case seen[t.Name]:
 			return nil, fmt.Errorf("%s: tool %q is defined twice", path, t.Name)
+		case t.Name == handoverTool:
+			return nil, fmt.Errorf("%s: the name %q is taken by the handover between voices", path, t.Name)
 		case strings.TrimSpace(t.Command) == "":
 			return nil, fmt.Errorf("%s: tool %q has no command", path, t.Name)
 		case strings.TrimSpace(t.Description) == "":
@@ -214,6 +222,9 @@ func thinkWithTools(ctx context.Context, cfg LLMConfig, tools []callTool, wait s
 		}
 		waits := false
 		for _, call := range calls {
+			if t := findTool(tools, call.Function.Name); t != nil && t.handover {
+				continue // nothing to wait for: the other voice speaks next
+			}
 			waits = waits || !later(call)
 		}
 		if waits && len(said) == 0 && round == 0 && !kept && wait != "" && out.aside != nil {
@@ -222,7 +233,27 @@ func thinkWithTools(ctx context.Context, cfg LLMConfig, tools []callTool, wait s
 		begin := len(msgs)
 		// What was said before looking goes along: a model that does not see it says it again.
 		msgs = append(msgs, chatMessage{Role: "assistant", Content: strings.Join(said, " "), ToolCalls: calls})
+		handed := false
 		for _, call := range calls {
+			if t := findTool(tools, call.Function.Name); t != nil && t.handover {
+				result, ok := "Verbinden geht gerade nicht.", false
+				if out.handover != nil && !handed {
+					result, ok = out.handover(call)
+				}
+				if ok {
+					handed = true
+					if len(said) == 0 && !kept { // a handover without a word would be a voice out of nowhere
+						var to struct {
+							Mit string `json:"mit"`
+						}
+						_ = json.Unmarshal([]byte(call.Function.Arguments), &to)
+						out.sentence(fmt.Sprintf(handoverLine, to.Mit))
+					}
+				}
+				note("lookup", map[string]any{"name": call.Function.Name, "arguments": call.Function.Arguments, "handover": ok, "reminded": kept})
+				msgs = append(msgs, chatMessage{Role: "tool", ToolCallID: call.ID, Content: result})
+				continue
+			}
 			if later(call) {
 				result := out.later(call)
 				note("lookup", map[string]any{"name": call.Function.Name, "arguments": call.Function.Arguments, "background": result == jobStarted, "reminded": kept})
@@ -248,6 +279,9 @@ func thinkWithTools(ctx context.Context, cfg LLMConfig, tools []callTool, wait s
 			keep := append([]chatMessage(nil), msgs[begin:]...)
 			keep[0].Content = "" // those sentences are remembered with the answer
 			out.looked(keep)
+		}
+		if handed {
+			return nil // the other voice speaks next
 		}
 		if kept && !waits {
 			return nil // it already said that it is on it; the result is reported when it comes

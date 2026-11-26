@@ -132,6 +132,50 @@ agent on the other end ask before it does anything that cannot be undone. A mode
 says "I'll look" and calls nothing is reminded once, silently, to do what it announced.
 Events: `lookup` (`background`, `reminded`), `lookup_done`, and `reply` with `report`.
 
+Several characters can hold the same call. `-voices voices.json` replaces `-persona`,
+`-tts-cmd` and `-tts-rate`; `-voice Name` says who starts:
+
+```json
+[{"name": "Alice", "about": "the one to talk and think with", "persona": "alice.md",
+  "tts_cmd": "alice-voice --pcm 16000", "tts_rate": 16000, "tools_wait": "One moment."},
+ {"name": "Johann", "about": "the butler, for getting things done", "persona": "johann.md",
+  "tts_cmd": "johann-voice --pcm", "tts_rate": 24000}]
+```
+
+The model gets a tool `verbinden` ("put through"): when the person asks for the other
+one, the voice that is speaking finishes its sentence, and the next answer comes from
+the other persona in the other voice. The conversation and everything that was looked
+up stay; the one that takes over is told that the answers so far were not its own.
+Tool commands find the name of the voice that is speaking in `AGENTCALLER_VOICE`.
+Events: `handover` (`from`, `to`); `reply` carries `voice`.
+
+The agent can be made to mind who is speaking. `-speakers speakers.json` names a command
+that runs for the length of the call:
+
+```json
+{"command": "/usr/local/bin/speaker-check", "guest_persona": "guest.md", "password": "..."}
+```
+
+For every stretch of speech it gets one line `{"wav": "/path.wav", "seconds": 2.4}` and
+answers one line, for instance `{"speaker": "Sam", "trusted": true, "score": 0.83}`;
+`"unclear": true` when it cannot tell, `"short": true` when there was too little to
+hear, `"note"` for what is known about a guest. It runs next to the speech recognition
+and costs the answer no time. The call starts locked. Until a trusted voice is heard,
+the model works from the guest persona and sees nothing of what was said with trusted
+speakers; it is offered only the tools marked `"guests": true`, never the handover, and
+outcomes of errands wait until the trusted speaker is back. This is done by what the
+model is sent, not by asking it to keep quiet: it cannot tell what it is not shown.
+A check that fails or times out counts as a guest. The password, spoken, unlocks the
+call for whoever says it. It is matched in the transcript (case, hyphens and spaces
+aside) and replaced by `[Passwort]` before the model or the event log see the sentence,
+so the model cannot give it away; the file must be readable by its owner alone.
+A voice profile tells who is probably speaking. It is not a lock: a recording or a
+cloned voice passes it. Events: `speaker` (`trusted`, `guest`, `score`, `speaker`).
+
+Before the first word, the prompts and tool lists of the call are sent to the chat
+endpoint once with a one-token answer, so that a server with a prefix cache has read
+the persona by the time the person speaks (event `warmed` with `ms`).
+
 Measured that way on one machine (Whisper large-v3 and a 27B model on local GPUs), two
 runs of three turns each: the first sound of the answer left 0.9 s after the pause was
 reported in four turns and 1.4 and 1.9 s in the two where the recogniser was slow. The

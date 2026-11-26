@@ -45,7 +45,12 @@ type converseConfig struct {
 	recordHeard string // WAV of what the agent heard, as its timeline has it
 	toolsPath   string
 	tools       []callTool
-	toolsWait   string           // said while the first lookup of an answer runs
+	toolsWait   string // said while the first lookup of an answer runs
+	voicesPath  string
+	voices      []callVoice // several characters on one call; empty: the one of -persona and -tts-cmd
+	voiceName   string      // which of them starts
+	guardPath   string
+	guard       *speakerGuard    // who is speaking decides what the agent knows; nil: everybody is trusted
 	clock       func() time.Time // tells the model date and time with every question; nil: it is not told
 }
 
@@ -113,6 +118,9 @@ func parseConverseArgs(args []string, stderr io.Writer) (converseConfig, error) 
 	flags.IntVar(&cfg.llm.MaxTokens, "max-tokens", 320, "upper bound for one answer")
 	flags.StringVar(&cfg.toolsPath, "tools", "", "JSON file with what the agent may look up during the call: [{name, description, parameters, command, timeout_seconds}]; the command gets the arguments as JSON on stdin and prints its findings")
 	flags.StringVar(&cfg.toolsWait, "tools-wait", "Einen Moment, ich schaue nach.", "what the agent says while a lookup runs (empty: nothing)")
+	flags.StringVar(&cfg.voicesPath, "voices", "", "JSON file with several voices that can hold this call, instead of -persona, -tts-cmd and -tts-rate: [{name, about, persona, guest_persona, tts_cmd, tts_rate, tools_wait}]; the one that speaks hands over when the peer asks for another")
+	flags.StringVar(&cfg.voiceName, "voice", "", "with -voices: the voice that starts (default: the first)")
+	flags.StringVar(&cfg.guardPath, "speakers", "", "JSON file {command, guest_persona, password}: the command tells who is speaking (it gets {\"wav\": path, \"seconds\": n} per line and answers {speaker, trusted, score, note}); until it trusts the voice the agent has the guest persona, no history with trusted speakers and only the tools marked \"guests\": true; the password, spoken, unlocks the call")
 	flags.StringVar(&cfg.personaPath, "persona", "", "text file with the agent's character (system prompt); the telephone rules are appended")
 	flags.StringVar(&cfg.greeting, "greeting", "", "what the agent says when the call connects (default: the peer speaks first)")
 	flags.DurationVar(&cfg.greetAfter, "greeting-delay", 0, "how long the agent waits after the call connects before it greets: the phone has to reach the ear")
@@ -140,8 +148,12 @@ func parseConverseArgs(args []string, stderr io.Writer) (converseConfig, error) 
 	case cfg.simulate != "" && flags.NArg() != 0, cfg.simulate == "" && flags.NArg() != 1:
 		flags.Usage()
 		return cfg, errUsage
-	case cfg.ttsCmd == "":
+	case cfg.ttsCmd == "" && cfg.voicesPath == "":
 		return cfg, errors.New("-tts-cmd is required")
+	case cfg.voicesPath != "" && (cfg.ttsCmd != "" || cfg.personaPath != ""):
+		return cfg, errors.New("-voices replaces -persona and -tts-cmd: give one or the other")
+	case cfg.voiceName != "" && cfg.voicesPath == "":
+		return cfg, errors.New("-voice needs -voices")
 	case cfg.hangup != "goodbye" && cfg.hangup != "asked" && cfg.hangup != "never":
 		return cfg, errors.New("-hangup must be goodbye, asked or never")
 	case cfg.call.answerTimeout < 0 || cfg.call.maxDuration < 0 || cfg.call.endSilence <= 0:
@@ -157,15 +169,14 @@ func parseConverseArgs(args []string, stderr io.Writer) (converseConfig, error) 
 		cfg.call.target = flags.Arg(0)
 	}
 	cfg.call.bargeIn = !cfg.noBargeIn
-	cfg.llm.Prompt = defaultPersona
+	persona := defaultPersona
 	if cfg.personaPath != "" {
 		raw, err := os.ReadFile(cfg.personaPath)
 		if err != nil {
 			return cfg, fmt.Errorf("read -persona: %w", err)
 		}
-		cfg.llm.Prompt = strings.TrimSpace(string(raw))
+		persona = strings.TrimSpace(string(raw))
 	}
-	cfg.llm.Prompt += "\n\n" + phoneRules
 	if cfg.toolsPath != "" {
 		tools, err := loadTools(cfg.toolsPath)
 		if err != nil {
@@ -173,13 +184,64 @@ func parseConverseArgs(args []string, stderr io.Writer) (converseConfig, error) 
 		}
 		cfg.tools = tools
 	}
+	if cfg.voicesPath != "" {
+		voices, err := loadVoices(cfg.voicesPath)
+		if err != nil {
+			return cfg, fmt.Errorf("read -voices: %w", err)
+		}
+		start := 0
+		if cfg.voiceName != "" {
+			if start = findVoice(voices, cfg.voiceName); start < 0 {
+				return cfg, fmt.Errorf("-voice: there is no voice %q in %s", cfg.voiceName, cfg.voicesPath)
+			}
+		}
+		voices[0], voices[start] = voices[start], voices[0] // the one that starts comes first
+		cfg.voices = voices
+		cfg.call.inRate = voicesRate(voices)
+		if len(voices) > 1 {
+			if findTool(cfg.tools, handoverTool) != nil {
+				return cfg, fmt.Errorf("-tools: the name %q is taken by the handover between voices", handoverTool)
+			}
+			cfg.tools = append(cfg.tools, handoverSpec(voices))
+		}
+		persona = voices[0].prompt
+	}
+	if cfg.guardPath != "" {
+		guard, err := loadGuard(cfg.guardPath)
+		if err != nil {
+			return cfg, fmt.Errorf("read -speakers: %w", err)
+		}
+		cfg.guard = guard
+	}
 	cfg.clock = time.Now
-	if len(cfg.tools) > 0 {
-		cfg.llm.Prompt += " " + lookupRules
-	} else {
-		cfg.llm.Prompt += " " + noLookupRules
+	cfg.llm.Prompt = phonePrompt(persona, len(cfg.tools) > 0)
+	for i := range cfg.voices {
+		v := &cfg.voices[i]
+		v.prompt = phonePrompt(v.prompt, len(cfg.tools) > 0)
+		if cfg.guard != nil {
+			v.guestPrompt = cfg.guard.prompt
+			if v.GuestPersona != "" {
+				raw, err := os.ReadFile(v.GuestPersona)
+				if err != nil {
+					return cfg, fmt.Errorf("read -voices: voice %q: %w", v.Name, err)
+				}
+				v.guestPrompt = strings.TrimSpace(string(raw))
+			}
+			v.guestPrompt = phonePrompt(v.guestPrompt, len(guestTools(cfg.tools)) > 0) + " " + guestRules
+		}
+	}
+	if cfg.guard != nil {
+		cfg.guard.prompt = phonePrompt(cfg.guard.prompt, len(guestTools(cfg.tools)) > 0) + " " + guestRules
 	}
 	return cfg, nil
+}
+
+// phonePrompt is a persona with the rules of the telephone.
+func phonePrompt(persona string, tools bool) string {
+	if tools {
+		return persona + "\n\n" + phoneRules + " " + lookupRules
+	}
+	return persona + "\n\n" + phoneRules + " " + noLookupRules
 }
 
 func runConverse(ctx context.Context, cfg converseConfig, stderr io.Writer) error {
@@ -198,13 +260,38 @@ func runConverse(ctx context.Context, cfg converseConfig, stderr io.Writer) erro
 			return transcribeHTTP(ctx, cfg.sttURL, cfg.sttModel, cfg.sttLanguage, pcm)
 		},
 		think: func(ctx context.Context, msgs []chatMessage, out thinkSink) error {
-			return thinkWithTools(ctx, cfg.llm, cfg.tools, cfg.toolsWait, msgs, out, func(event string, fields map[string]any) {
+			return thinkWithTools(ctx, cfg.llm, c.toolsNow(), c.toolsWait(), msgs, out, func(event string, fields map[string]any) {
 				c.events.emit(event, fields)
 			})
 		},
-		speak: commandSpeaker(cfg.ttsCmd, cfg.call.inRate),
+	}
+	if len(cfg.voices) > 0 {
+		for i := range cfg.voices {
+			v := &cfg.voices[i]
+			v.speak = resampledSpeaker(commandSpeaker(v.TTSCmd, v.TTSRate), v.TTSRate, cfg.call.inRate)
+		}
+		_ = os.Setenv("AGENTCALLER_VOICE", cfg.voices[0].Name)
+	} else {
+		chain.speak = commandSpeaker(cfg.ttsCmd, cfg.call.inRate)
+	}
+	if cfg.guard != nil {
+		listener, err := startSpeakerCommand(ctx, cfg.guard.Command, stderr)
+		if err != nil {
+			return fmt.Errorf("-speakers: %w", err)
+		}
+		defer listener.close()
+		chain.who = listener.identify
+	}
+	chain.warm = func(ctx context.Context, msgs []chatMessage, tools []callTool) error {
+		once := cfg.llm
+		once.MaxTokens = 1
+		_, err := streamTurn(ctx, once, toolSpecs(tools), msgs, func(string) {})
+		return err
 	}
 	c = newConversation(cfg, chain, eventsOut)
+	// While it rings, the model reads what it will be asked with: the personas and the
+	// tools. The first answer then starts from a warm cache instead of reading them.
+	go c.warm(ctx)
 	if cfg.recordHeard != "" {
 		c.tape = &bytes.Buffer{}
 		defer func() {
@@ -242,6 +329,10 @@ type voiceChain struct {
 	think func(ctx context.Context, msgs []chatMessage, out thinkSink) error
 	// speak writes text as raw PCM (at the call's input rate) to w until done or cancelled.
 	speak func(ctx context.Context, text string, w io.Writer) error
+	// who tells whose voice this speech is; nil: nobody checks.
+	who func(ctx context.Context, pcm []byte, dur time.Duration) (speakerVerdict, error)
+	// warm lets the model read a start of conversation ahead of time; nil: it does not.
+	warm func(ctx context.Context, msgs []chatMessage, tools []callTool) error
 }
 
 // thinkSink takes what think produces.
@@ -258,6 +349,9 @@ type thinkSink struct {
 	// later takes work that outlasts the answer and returns what to tell the model about
 	// it. Without it, such work is waited for like any lookup.
 	later func(toolCall) string
+	// handover takes the request to give the call to another voice; false: refused,
+	// with the reason for the model.
+	handover func(toolCall) (string, bool)
 	// plain asks for an answer without tools: a report tells what came back and looks
 	// nothing up on its own.
 	plain bool
@@ -454,6 +548,13 @@ type conversation struct {
 	greetOwed  bool     // the greeting is due and has not been said to the end
 	unsaid     []string // background work whose outcome is in the history but was not spoken
 	life       context.Context
+	voice      int          // which of cfg.voices holds the call
+	handTo     int          // the voice asked to take over, plus one; 0: none
+	open       []bool       // per message of history: said with a guest, so a guest may be shown it
+	owner      bool         // with a guard: the voice heard last is a trusted one
+	unlocked   bool         // the password was said: trusted for the rest of the call
+	speaker    string       // name of the voice heard last, if it is a known one
+	held       []*jobReport // outcomes that wait for a trusted speaker
 }
 
 func newConversation(cfg converseConfig, chain voiceChain, eventsOut io.Writer) *conversation {
@@ -611,7 +712,7 @@ func (c *conversation) sayGreeting(ctx context.Context) {
 	}
 	turn, end, _ := c.beginTurn(ctx, true)
 	defer end()
-	err := c.chain.speak(turn, c.cfg.greeting, ctxWriter{ctx: turn, p: c.say})
+	err := c.speech()(turn, c.cfg.greeting, ctxWriter{ctx: turn, p: c.say})
 	if err != nil {
 		if turn.Err() == nil {
 			c.events.emit("reply_error", map[string]any{"error": err.Error()})
@@ -622,7 +723,7 @@ func (c *conversation) sayGreeting(ctx context.Context) {
 	c.greetOwed = false
 	c.mu.Unlock()
 	c.remember("", nil, c.cfg.greeting)
-	c.events.emit("reply", map[string]any{"text": c.cfg.greeting, "greeting": true})
+	c.events.emit("reply", c.voiced(map[string]any{"text": c.cfg.greeting, "greeting": true}))
 }
 
 // startJob runs a background tool for as long as the call lasts, not just the turn that
@@ -685,6 +786,9 @@ func (c *conversation) report(ctx context.Context, s segment) {
 		}
 	}
 	r := s.report
+	if c.holdReport(r) {
+		return // a guest is on the line: the outcome waits for somebody who may hear it
+	}
 	note := fmt.Sprintf(jobDone, r.call.Function.Name, r.call.Function.Arguments, r.result)
 	if r.err != nil {
 		note = fmt.Sprintf(jobFailed, r.call.Function.Name, r.call.Function.Arguments, r.err)
@@ -695,9 +799,9 @@ func (c *conversation) report(ctx context.Context, s segment) {
 	// enough for the peer to talk over most reports, and those outcomes were never said.
 	c.mu.Lock()
 	owed, before := c.owedNote()
-	c.history = append(c.history, chatMessage{Role: "user", Content: note})
+	c.push(false, chatMessage{Role: "user", Content: note})
 	c.unsaid = append(c.unsaid, r.call.Function.Name+" "+clip(r.call.Function.Arguments, 160))
-	msgs := append([]chatMessage{{Role: "system", Content: c.cfg.llm.Prompt}}, c.history...)
+	msgs := c.view()
 	c.mu.Unlock()
 	if owed != "" {
 		msgs = append(msgs, chatMessage{Role: "user", Content: owed})
@@ -719,7 +823,7 @@ func (c *conversation) report(ctx context.Context, s segment) {
 	c.said(before + 1)
 	reply := strings.Join(spoken, " ")
 	c.remember("", looked, reply)
-	fields := map[string]any{"text": reply, "interrupted": interrupted, "report": true}
+	fields := c.voiced(map[string]any{"text": reply, "interrupted": interrupted, "report": true})
 	if !first.IsZero() {
 		fields["first_audio_ms"] = first.Sub(s.ended).Milliseconds() // since the work came back
 	}
@@ -748,11 +852,12 @@ const maxHistory = 60
 func (c *conversation) remember(user string, looked []chatMessage, assistant string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	open := c.locked()
 	if user != "" {
-		c.history = append(c.history, chatMessage{Role: "user", Content: user})
+		c.push(open, chatMessage{Role: "user", Content: user})
 	}
-	c.history = append(c.history, looked...)
-	c.history = append(c.history, chatMessage{Role: "assistant", Content: assistant})
+	c.push(open, looked...)
+	c.push(open, chatMessage{Role: "assistant", Content: assistant})
 	extra := max(len(c.history)-maxHistory, 0)
 	// Never start in the middle of a lookup: a result without its request is an error to the model.
 	for extra > 0 && extra < len(c.history) && (c.history[extra].Role == "tool" || len(c.history[extra].ToolCalls) > 0) {
@@ -760,6 +865,7 @@ func (c *conversation) remember(user string, looked []chatMessage, assistant str
 	}
 	if extra > 0 {
 		c.history = append(c.history[:0], c.history[extra:]...)
+		c.open = append(c.open[:0], c.open[extra:]...)
 	}
 }
 
@@ -774,6 +880,20 @@ func (c *conversation) answer(ctx context.Context, s segment) {
 	if len(pcm) == 0 {
 		return
 	}
+	var verdict chan speakerVerdict
+	if c.chain.who != nil {
+		// Whose voice it is, is found out while the words are: it costs the answer no time.
+		verdict = make(chan speakerVerdict, 1)
+		go func() {
+			limit, done := context.WithTimeout(ctx, 3*time.Second)
+			defer done()
+			v, err := c.chain.who(limit, pcm, s.dur)
+			if err != nil {
+				v = speakerVerdict{err: err}
+			}
+			verdict <- v
+		}()
+	}
 	sttStart := time.Now()
 	text, err := c.chain.listen(ctx, pcm)
 	if err != nil {
@@ -782,7 +902,7 @@ func (c *conversation) answer(ctx context.Context, s segment) {
 		}
 		return
 	}
-	text = strings.TrimSpace(text)
+	text, password := c.cfg.guard.redact(strings.TrimSpace(text))
 	if text == "" || isTranscriptionNoise(text) || tooMuchForItsLength(text, s.dur) {
 		c.events.emit("heard", map[string]any{"text": "", "ignored": text, "at": s.at.Seconds()})
 		c.mu.Lock()
@@ -799,20 +919,38 @@ func (c *conversation) answer(ctx context.Context, s segment) {
 		c.greetOwed = false // the peer spoke first
 		c.mu.Unlock()
 	}
+	whose := ""
+	if verdict != nil && text != "" {
+		select {
+		case v := <-verdict:
+			whose = c.judge(v, password)
+		case <-ctx.Done():
+			return
+		}
+	}
 
 	c.mu.Lock()
 	if text != "" {
+		if c.locked() {
+			text = c.guestTag() + text // whoever is trusted later sees who said it
+		}
 		c.pending = append(c.pending, text)
 	}
 	user := strings.Join(c.pending, " ")
-	msgs := append([]chatMessage{{Role: "system", Content: c.cfg.llm.Prompt}}, c.history...)
+	msgs := c.view()
 	owed, owedN := c.owedNote()
+	if c.locked() {
+		owed, owedN = "", 0 // outcomes are not for a guest
+	}
 	c.mu.Unlock()
 	asked := user
 	if c.cfg.clock != nil {
 		// With the question, not in the system prompt: what the model has already read
 		// stays the same from turn to turn, and the server need not read it again.
 		asked = "(" + spokenNow(c.cfg.clock()) + " Das ist eine Angabe des Systems, dein Gegenüber hat sie nicht gesagt.)\n\n" + user
+	}
+	if whose != "" {
+		asked = "(" + whose + " Das ist eine Angabe des Systems, dein Gegenüber hat sie nicht gesagt.)\n\n" + asked
 	}
 	if owed != "" {
 		asked += "\n\n" + owed
@@ -830,6 +968,7 @@ func (c *conversation) answer(ctx context.Context, s segment) {
 		c.events.emit("reply_error", map[string]any{"error": err.Error()})
 	}
 	if len(spoken) == 0 {
+		c.takeHandover()  // it was not said, so it does not happen
 		if !interrupted { // nothing came back; do not carry the question forever
 			c.mu.Lock()
 			c.pending = nil
@@ -842,7 +981,7 @@ func (c *conversation) answer(ctx context.Context, s segment) {
 	c.pending = nil
 	c.mu.Unlock()
 	c.remember(user, looked, reply)
-	fields := map[string]any{"text": reply, "interrupted": interrupted}
+	fields := c.voiced(map[string]any{"text": reply, "interrupted": interrupted})
 	if len(looked) > 0 {
 		fields["looked_up"] = true
 	}
@@ -855,6 +994,11 @@ func (c *conversation) answer(ctx context.Context, s segment) {
 	}
 	c.events.emit("reply", fields)
 
+	if to, ok := c.takeHandover(); ok {
+		end()
+		c.handOver(ctx, to)
+		return
+	}
 	if !interrupted && c.cfg.hangsUp(user) {
 		select {
 		case <-turn.Done(): // the peer had more to say
@@ -886,6 +1030,7 @@ func (c *conversation) respond(ctx context.Context, msgs []chatMessage, plain bo
 			aside:    func(s string) { say(piece{text: s, aside: true}) },
 			looked:   func(m []chatMessage) { found = append(found, m...) },
 			later:    c.startJob,
+			handover: c.askHandover,
 			plain:    plain,
 		})
 		close(pieces)
@@ -895,7 +1040,7 @@ func (c *conversation) respond(ctx context.Context, msgs []chatMessage, plain bo
 		if err != nil {
 			continue // speaking failed or the peer cut in: let think finish, say no more
 		}
-		if err = c.chain.speak(ctx, p.text, ctxWriter{ctx: ctx, p: c.say, first: &firstAudio}); err == nil && !p.aside {
+		if err = c.speech()(ctx, p.text, ctxWriter{ctx: ctx, p: c.say, first: &firstAudio}); err == nil && !p.aside {
 			spoken = append(spoken, p.text)
 		}
 	}

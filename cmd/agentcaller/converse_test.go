@@ -163,12 +163,31 @@ type fakeChain struct {
 	stall          bool             // one answer never comes: think waits for its turn to be cancelled
 	stallAt        int              // which one, counting from zero
 	jobs           map[int]toolCall // question number -> background work the model asks for
+	handovers      map[int]toolCall // question number -> the model asks for another voice
+	verdicts       []speakerVerdict // whose voice each stretch of speech is; nil: nobody checks
 
 	heardBytes []int
 	asked      [][]chatMessage
 }
 
 func (f *fakeChain) chain() voiceChain {
+	chain := f.plainChain()
+	if f.verdicts != nil {
+		chain.who = func(context.Context, []byte, time.Duration) (speakerVerdict, error) {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			if len(f.verdicts) == 0 {
+				return speakerVerdict{}, errors.New("no verdict left")
+			}
+			v := f.verdicts[0]
+			f.verdicts = f.verdicts[1:]
+			return v, nil
+		}
+	}
+	return chain
+}
+
+func (f *fakeChain) plainChain() voiceChain {
 	return voiceChain{
 		listen: func(_ context.Context, pcm []byte) (string, error) {
 			f.mu.Lock()
@@ -195,6 +214,14 @@ func (f *fakeChain) chain() voiceChain {
 			f.mu.Unlock()
 			if hasJob {
 				if got := out.later(job); got != jobStarted {
+					return errors.New(got)
+				}
+			}
+			f.mu.Lock()
+			hand, hasHand := f.handovers[n]
+			f.mu.Unlock()
+			if hasHand {
+				if got, ok := out.handover(hand); !ok {
 					return errors.New(got)
 				}
 			}
