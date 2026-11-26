@@ -146,6 +146,11 @@ All notable changes to AgentCaller (meowcaller before the fork), tracked per mod
   the pause was reported (the transcription), where speaking it then would have added
   the 500 ms the speech command took. `-simulate` lets the recording speak first when
   the flag is set.
+- **One account, one process** — `implemented`, tested. A second `call`, `converse`,
+  `notify` or `pair` on a store that another process holds now ends at once with a
+  clear error instead of taking over the connection of a call under way (a lock file
+  next to the store, `flock`; released when the process ends). Unix only; elsewhere
+  nothing changes.
 
 ### cmd/meowcaller — interactive voice menu `talk` (VAD → STT → LLM → TTS) — `implemented`
 - Added the `meowcaller talk` subcommand: a state machine that plays a fixed
