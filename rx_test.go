@@ -156,3 +156,28 @@ func TestReceiverLossAndReorder(t *testing.T) {
 		}
 	}
 }
+
+func TestReceiverReportsLowRateFrames(t *testing.T) {
+	tone := make([]float32, FrameSamples)
+	for i := range tone {
+		tone[i] = 0.2 * float32(math.Sin(2*math.Pi*220*float64(i)/SampleRate))
+	}
+	payloads := encodeAll(t, [][]float32{tone, tone, tone, tone})
+	payloads[2] = append([]byte(nil), payloads[2]...)
+	payloads[2][0] |= 0x04 // the low-rate bit of the frame header
+
+	rx := newAudioReceiver(mlow.NewMlowDecoder())
+	defer rx.close()
+	sink := &collectSink{}
+	now := time.Now()
+	for i, p := range payloads {
+		rx.push(uint16(100+i), uint32(i*FrameSamples), p, now.Add(time.Duration(i)*60*time.Millisecond), sink, false)
+	}
+	st := rx.stats()
+	if st.ActiveFrames != 4 || st.LowRate != 1 || st.Unsupported != 0 {
+		t.Fatalf("speech %d, low rate %d, unsupported %d; want 4, 1, 0", st.ActiveFrames, st.LowRate, st.Unsupported)
+	}
+	if len(sink.pcm) != 4*FrameSamples {
+		t.Fatalf("%d samples reached the sink, want %d", len(sink.pcm), 4*FrameSamples)
+	}
+}

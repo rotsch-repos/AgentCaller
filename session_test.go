@@ -94,6 +94,38 @@ func TestMediaPipelineRoundTrips(t *testing.T) {
 	}
 }
 
+func TestMediaPipelineRekeysReceivePathForAnsweringDevice(t *testing.T) {
+	callKey := iota32()
+	self := "111111111111111:0@lid"
+	initialPeer := "222222222222222:0@lid"
+	answeringPeer := "222222222222222:7@lid"
+	const ssrc = 0x55667788
+	receiver, err := NewMediaPipeline(callKey, self, initialPeer, ssrc, FrameSamples)
+	if err != nil {
+		t.Fatalf("receiver: %v", err)
+	}
+	answeringDevice, err := NewMediaPipeline(callKey, answeringPeer, self, ssrc, FrameSamples)
+	if err != nil {
+		t.Fatalf("answering device: %v", err)
+	}
+	payload := []byte{1, 2, 3, 4, 5}
+	packet, err := answeringDevice.ProtectAudio(payload)
+	if err != nil {
+		t.Fatalf("protect: %v", err)
+	}
+
+	if err = receiver.RekeyRecv(callKey, answeringPeer); err != nil {
+		t.Fatalf("RekeyRecv: %v", err)
+	}
+	_, got, ok := receiver.UnprotectAudio(packet)
+	if !ok {
+		t.Fatal("rekeyed receiver rejected answering-device packet")
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("rekeyed payload = %x, want %x", got, payload)
+	}
+}
+
 // TestProtectUsesSelfLidForSend pins the send keystream to the self LID.
 func TestProtectUsesSelfLidForSend(t *testing.T) {
 	callKey := iota32()
@@ -151,5 +183,27 @@ func TestRecvUsesPeerLidForRecv(t *testing.T) {
 	_, mis, _ := us2.UnprotectAudio(wrong)
 	if bytes.Equal(mis, opus) {
 		t.Error("recv must not recover a self-LID-keyed packet")
+	}
+}
+
+func TestMediaPipelineTracksSenderStats(t *testing.T) {
+	pipe, err := NewMediaPipeline(iota32(), "111111111111111:0@lid", "222222222222222:0@lid", 0x12345678, 960)
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	header := rtp.RtpHeader{
+		Marker:         true,
+		PayloadType:    rtp.RtpPayloadTypeH264,
+		SequenceNumber: 0,
+		Timestamp:      90000,
+		Ssrc:           0x12345678,
+		VideoExtension: &rtp.VideoRtpExtension{MediaFrameInfo: rtp.VideoMediaFrameInfoIDR},
+	}
+	if _, err := pipe.ProtectRTP(&header, []byte{0x65, 1, 2, 3}); err != nil {
+		t.Fatalf("protect: %v", err)
+	}
+	stats := pipe.SenderStats()
+	if stats.PacketsSent != 1 || stats.OctetsSent != 4 || stats.RtpTimestamp != 90000 {
+		t.Errorf("stats = %+v, want packets=1 octets=4 timestamp=90000", stats)
 	}
 }

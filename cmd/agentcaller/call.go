@@ -512,6 +512,7 @@ func (d *duplex) stats(call duplexCall) map[string]any {
 		"tx_flushed_ms": ms(tx.Flushed), "tx_underruns": tx.Underruns, "tx_queued_ms": d.live.Buffered().Milliseconds(),
 		"rx_packets": rx.Received, "rx_lost": rx.Lost, "rx_reordered": rx.Reordered, "rx_late": rx.Late,
 		"rx_duplicates": rx.Duplicates, "rx_filled_ms": ms(rx.ConcealedSamples),
+		"rx_speech_frames": rx.ActiveFrames, "rx_low_rate_frames": rx.LowRate, "rx_unsupported_frames": rx.Unsupported,
 	}
 	if d.out != nil {
 		out["out_dropped_frames"] = d.out.dropped.Load()
@@ -807,7 +808,10 @@ func placeCall(ctx context.Context, cfg callConfig, events *eventLog, stderr io.
 	return run(call)
 }
 
-// runWithVideo is run plus the optional video streams of the call command.
+// runWithVideo is run plus the optional video streams of the call command. The peer's
+// camera is accepted when there is somewhere to write it (-video-out); our own picture
+// is offered as an upgrade of the audio call once media flows (-video-in) and goes out
+// when the peer accepts.
 func (d *duplex) runWithVideo(ctx context.Context, call *agentcaller.Call, in io.Reader, control <-chan string) error {
 	cfg, events := d.cfg, d.events
 	if cfg.videoOut != "" {
@@ -819,6 +823,18 @@ func (d *duplex) runWithVideo(ctx context.Context, call *agentcaller.Call, in io
 		defer rec.Close()
 		call.ReceiveVideo(rec)
 	}
+	if cfg.videoOut != "" || cfg.videoIn != "" {
+		call.OnVideoState(func(s agentcaller.VideoState) {
+			events.emit("video_state", map[string]any{"active": s.Active, "upgrade": s.Upgrade, "orientation": s.Orientation, "state": s.Raw})
+			if s.Upgrade && cfg.videoOut != "" {
+				go func() { // not on the signalling goroutine: accepting sends stanzas
+					if err := call.AcceptVideo(); err != nil {
+						events.emit("video_error", map[string]any{"error": err.Error()})
+					}
+				}()
+			}
+		})
+	}
 	if v := inputReader(cfg.videoIn); v != nil {
 		send := func(au []byte, n int) error {
 			if cfg.videoFPS > 0 {
@@ -826,6 +842,18 @@ func (d *duplex) runWithVideo(ctx context.Context, call *agentcaller.Call, in io
 			}
 			return call.SendVideo(au)
 		}
+		go func() {
+			select {
+			case <-d.ready:
+			case <-ctx.Done():
+				return
+			}
+			if !call.IsSendingVideo() {
+				if err := call.StartVideo(); err != nil {
+					events.emit("video_error", map[string]any{"error": err.Error()})
+				}
+			}
+		}()
 		go pumpVideo(ctx, send, v, cfg.videoFPS, d.ready, events)
 	}
 	return d.run(ctx, call, in, control)

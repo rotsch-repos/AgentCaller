@@ -4,6 +4,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rotsch-repos/agentcaller/signaling"
 	"go.mau.fi/whatsmeow/types"
 )
 
@@ -16,16 +17,30 @@ type Call struct {
 	id   string
 	peer types.JID
 
-	mu           sync.Mutex
-	phase        CallPhase
-	player       *Player
-	sink         AudioSink
-	onReady      func()
-	onEnd        func(reason string)
-	onState      func(CallPhase)
-	videoSink    VideoSink
-	onVideoState func(VideoState)
-	concealLoss  bool
+	mu                     sync.Mutex
+	phase                  CallPhase
+	player                 *Player
+	sink                   AudioSink
+	onReady                func()
+	onEnd                  func(reason string)
+	onState                func(CallPhase)
+	onPeerAccept           func()
+	peerAccepted           bool
+	acceptNotified         bool
+	onMuteState            func(muted bool)
+	videoSink              VideoSink
+	onVideoState           func(VideoState)
+	onVideoKeyframeRequest func()
+	onReaction             func(CallReaction)
+	concealLoss            bool
+}
+
+// CallReaction is a transient emoji reaction received over the call's RTC app-data stream.
+// An empty Emoji with Removed set means the sender cleared their reaction.
+type CallReaction struct {
+	Emoji   string
+	Sender  types.JID
+	Removed bool
 }
 
 // ID returns the call-id (32 uppercase hex chars).
@@ -41,13 +56,20 @@ func (c *Call) State() CallPhase {
 	return c.phase
 }
 
-// IsVideo reports whether the inbound offer advertised video. Attach a VideoSink with
-// ReceiveVideo to receive the peer's H.264.
+// IsVideo reports whether either direction of the call currently has video.
 func (c *Call) IsVideo() bool {
-	if m := c.eng.lookup(c.id); m != nil {
-		return m.isVideo
-	}
-	return false
+	return c.eng.callIsVideo(c.id)
+}
+
+// IsSendingVideo reports whether this client currently owns an active or pending
+// outbound video flow.
+func (c *Call) IsSendingVideo() bool {
+	return c.eng.callIsSendingVideo(c.id)
+}
+
+// IsReceivingVideo reports whether the peer currently owns an active inbound video flow.
+func (c *Call) IsReceivingVideo() bool {
+	return c.eng.callIsReceivingVideo(c.id)
 }
 
 // Answer accepts an inbound call (preaccept + accept) and brings media up. No-op error
@@ -59,6 +81,40 @@ func (c *Call) Reject() error { return c.eng.reject(c) }
 
 // Hangup ends the call (either direction) and tears down media.
 func (c *Call) Hangup() error { return c.eng.hangup(c) }
+
+// StartVideo requests an audio-to-video upgrade. Outbound video remains gated until
+// the peer acknowledges the transition with state 4 or state 1.
+func (c *Call) StartVideo() error {
+	return c.eng.transitionVideo(c.id, signaling.VideoStateUpgradeRequestV2)
+}
+
+// AcceptVideo accepts a pending peer video upgrade without changing this client's
+// independent outbound video state.
+func (c *Call) AcceptVideo() error {
+	return c.eng.transitionVideo(c.id, signaling.VideoStateUpgradeAccept)
+}
+
+// StopVideo stops this client's outbound video while preserving peer video and audio.
+func (c *Call) StopVideo() error {
+	return c.eng.transitionVideo(c.id, signaling.VideoStateStopped)
+}
+
+// SetVideoEnabled mutes or unmutes this client's outbound camera flow with state 0/1.
+// It does not change whether the peer's video is received.
+func (c *Call) SetVideoEnabled(enabled bool) error {
+	return c.eng.setVideoEnabled(c.id, enabled)
+}
+
+// SetVideoOrientation announces the local camera rotation as quarter turns clockwise.
+func (c *Call) SetVideoOrientation(orientation int) error {
+	return c.eng.setVideoOrientation(c.id, orientation)
+}
+
+// SendReaction sends an emoji over this call's RTC app-data stream. Pass an empty
+// string to clear the reaction previously sent by this client.
+func (c *Call) SendReaction(emoji string) error {
+	return c.eng.sendReaction(c.id, emoji)
+}
 
 // Subscribe attaches p as the call's outbound audio player, replacing any previous one.
 // While the player is Playing, its source frames are encoded and sent to the peer;
@@ -114,6 +170,36 @@ func (c *Call) OnVideoState(fn func(VideoState)) {
 	c.mu.Unlock()
 }
 
+// OnVideoKeyframeRequest registers a callback for authenticated WhatsApp PLI/FIR
+// feedback. Encoded video sources should make their next access unit an IDR.
+func (c *Call) OnVideoKeyframeRequest(fn func()) {
+	c.mu.Lock()
+	c.onVideoKeyframeRequest = fn
+	c.mu.Unlock()
+}
+
+// OnReaction registers a callback for emoji reactions targeting this call.
+func (c *Call) OnReaction(fn func(CallReaction)) {
+	c.mu.Lock()
+	c.onReaction = fn
+	c.mu.Unlock()
+}
+
+func (c *Call) onReactionFn() func(CallReaction) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.onReaction
+}
+
+func (c *Call) requestVideoKeyframe() {
+	c.mu.Lock()
+	fn := c.onVideoKeyframeRequest
+	c.mu.Unlock()
+	if fn != nil {
+		fn()
+	}
+}
+
 // onVideoStateFn returns the Call's video-state callback under its lock.
 func (c *Call) onVideoStateFn() func(VideoState) {
 	c.mu.Lock()
@@ -160,15 +246,22 @@ func (c *Call) ReceiveStats() ReceiveStats {
 // rtp.AccessUnitSplitter cuts an encoder's byte stream into access units.
 //
 // NOT VALIDATED: the video send media path is unproven.
-func (c *Call) SendVideo(accessUnit []byte) error { return c.eng.sendVideoFrame(c.id, accessUnit, -1) }
+func (c *Call) SendVideo(accessUnit []byte) error {
+	return c.eng.sendVideoFrame(c.id, accessUnit, videoTiming{byPTS: true, pts: -1})
+}
 
 // SendVideoAt is SendVideo with an explicit presentation time (for example frame index
 // divided by frame rate), which keeps the peer's playback free of the jitter of a pipe.
 // pts must not be negative and should not run backwards.
-//
-// NOT VALIDATED: the video send media path is unproven.
 func (c *Call) SendVideoAt(accessUnit []byte, pts time.Duration) error {
-	return c.eng.sendVideoFrame(c.id, accessUnit, max(pts, 0))
+	return c.eng.sendVideoFrame(c.id, accessUnit, videoTiming{byPTS: true, pts: max(pts, 0)})
+}
+
+// SendVideoWithDuration sends one already-encoded H.264 access unit and advances the
+// outgoing RTP timestamp by duration for the next frame. A zero duration uses the sender
+// fallback frame step. Use either this or SendVideo/SendVideoAt on a call, not both.
+func (c *Call) SendVideoWithDuration(accessUnit []byte, duration time.Duration) error {
+	return c.eng.sendVideoFrame(c.id, accessUnit, videoTiming{duration: duration})
 }
 
 // OnReady registers a callback fired once media is flowing (relay bound, first frames
@@ -191,6 +284,50 @@ func (c *Call) OnStateChange(fn func(CallPhase)) {
 	c.mu.Lock()
 	c.onState = fn
 	c.mu.Unlock()
+}
+
+// OnPeerAccept registers a one-shot callback for the remote peer accepting an outgoing
+// call. If acceptance arrived before registration, the callback is invoked immediately.
+func (c *Call) OnPeerAccept(fn func()) {
+	c.mu.Lock()
+	c.onPeerAccept = fn
+	shouldNotify := c.peerAccepted && !c.acceptNotified && fn != nil
+	if shouldNotify {
+		c.acceptNotified = true
+	}
+	c.mu.Unlock()
+	if shouldNotify {
+		fn()
+	}
+}
+
+func (c *Call) markPeerAccepted() {
+	c.mu.Lock()
+	c.peerAccepted = true
+	fn := c.onPeerAccept
+	shouldNotify := !c.acceptNotified && fn != nil
+	if shouldNotify {
+		c.acceptNotified = true
+	}
+	c.mu.Unlock()
+	if shouldNotify {
+		fn()
+	}
+}
+
+// OnMuteState registers a callback fired for each inbound WhatsApp mute_v2 state.
+// The callback describes the remote party's microphone state: true means muted.
+func (c *Call) OnMuteState(fn func(muted bool)) {
+	c.mu.Lock()
+	c.onMuteState = fn
+	c.mu.Unlock()
+}
+
+// onMuteStateFn returns the Call's remote mute-state callback under its lock.
+func (c *Call) onMuteStateFn() func(bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.onMuteState
 }
 
 // setPhase advances the call's phase and fires OnStateChange (used by the engine).
