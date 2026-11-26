@@ -28,7 +28,11 @@ import (
 type linkedSession struct {
 	client    *whatsmeow.Client
 	container *sqlstore.Container
+	unlock    func()
 }
+
+// errStoreBusy: another agentcaller process holds the account (a call, a pairing).
+var errStoreBusy = errors.New("this account is in use by another agentcaller process (one linked device has one connection); wait for it to end")
 
 func openSession(ctx context.Context, path string, log zerolog.Logger) (*linkedSession, error) {
 	absPath, err := filepath.Abs(path)
@@ -41,22 +45,29 @@ func openSession(ctx context.Context, path string, log zerolog.Logger) (*linkedS
 	if err := prepareStorePath(absPath); err != nil {
 		return nil, err
 	}
+	unlock, err := lockStore(absPath)
+	if err != nil {
+		return nil, err
+	}
 	store.DeviceProps.Os = proto.String("Mac OS")
 	store.DeviceProps.PlatformType = waCompanionReg.DeviceProps_CHROME.Enum()
 	waLogger := waLog.Zerolog(log.Level(zerolog.WarnLevel))
 
 	container, err := sqlstore.New(ctx, "sqlite", sqliteDSN(absPath), waLogger.Sub("db"))
 	if err != nil {
+		unlock()
 		return nil, fmt.Errorf("open store: %w", err)
 	}
 	device, err := container.GetFirstDevice(ctx)
 	if err != nil {
 		container.Close()
+		unlock()
 		return nil, fmt.Errorf("load device: %w", err)
 	}
 	return &linkedSession{
 		client:    whatsmeow.NewClient(device, waLogger.Sub("wa")),
 		container: container,
+		unlock:    unlock,
 	}, nil
 }
 
@@ -180,5 +191,7 @@ func waitUntilReady(ctx context.Context, client *whatsmeow.Client, timeout time.
 
 func (s *linkedSession) Close() error {
 	s.client.Disconnect()
-	return s.container.Close()
+	err := s.container.Close()
+	s.unlock()
+	return err
 }

@@ -34,6 +34,7 @@ type converseConfig struct {
 	personaPath string
 	greeting    string
 	greetAfter  time.Duration
+	greetHello  time.Duration // the greeting waits this long for the peer's first word; 0: it does not wait
 	sttURL      string
 	sttModel    string
 	sttLanguage string
@@ -129,6 +130,7 @@ func parseConverseArgs(args []string, stderr io.Writer) (converseConfig, error) 
 	flags.StringVar(&cfg.personaPath, "persona", "", "text file with the agent's character (system prompt); the telephone rules are appended")
 	flags.StringVar(&cfg.greeting, "greeting", "", "what the agent says when the call connects (default: the peer speaks first)")
 	flags.DurationVar(&cfg.greetAfter, "greeting-delay", 0, "how long the agent waits after the call connects before it greets: the phone has to reach the ear")
+	flags.DurationVar(&cfg.greetHello, "greeting-after-hello", 0, "the greeting waits until the peer has said its first word (\"Hallo?\") and follows it at once, or comes by itself after this long; replaces -greeting-delay (0: greet when the call connects)")
 	flags.StringVar(&cfg.sttURL, "stt-url", "http://127.0.0.1:8000", "base URL of an OpenAI-compatible transcription endpoint")
 	flags.StringVar(&cfg.sttModel, "stt-model", "large-v3", "transcription model")
 	flags.StringVar(&cfg.sttLanguage, "stt-language", "de", "language hint for the transcription")
@@ -166,6 +168,8 @@ func parseConverseArgs(args []string, stderr io.Writer) (converseConfig, error) 
 		return cfg, errors.New("-voice needs -voices")
 	case cfg.hangup != "goodbye" && cfg.hangup != "asked" && cfg.hangup != "never":
 		return cfg, errors.New("-hangup must be goodbye, asked or never")
+	case cfg.greetHello < 0 || cfg.greetHello > 0 && cfg.greeting == "":
+		return cfg, errors.New("-greeting-after-hello must be positive and needs -greeting")
 	case cfg.call.answerTimeout < 0 || cfg.call.maxDuration < 0 || cfg.call.endSilence <= 0:
 		return cfg, errors.New("durations must be non-negative (-end-silence positive)")
 	case cfg.call.inRate < 4000 || cfg.call.inRate > 192000:
@@ -357,7 +361,7 @@ func runConverse(ctx context.Context, cfg converseConfig, stderr io.Writer) erro
 			close(on)
 			go pumpVideo(ctx, func(au []byte, _ int) error { return c.eye.WriteVideo(au) }, camera, cfg.simVideoFPS, on, c.events)
 		}
-		sim := newSimCall(peer, cfg.greeting != "")
+		sim := newSimCall(peer, cfg.greeting != "" && cfg.greetHello == 0)
 		err := c.run(ctx, sim)
 		if cfg.record != "" {
 			if werr := writeWAV16(cfg.record, sim.recording()); werr != nil {
@@ -599,6 +603,8 @@ type conversation struct {
 	pending    []string // heard but not answered yet
 	jobs       int      // background work under way
 	greetOwed  bool     // the greeting is due and has not been said to the end
+	greetHeld  bool     // the greeting waits for the peer's first word (-greeting-after-hello)
+	greetReady *spokenAhead
 	unsaid     []string // background work whose outcome is in the history but was not spoken
 	life       context.Context
 	voice      int          // which of cfg.voices holds the call
@@ -637,6 +643,9 @@ func (c *conversation) run(ctx context.Context, call duplexCall) error {
 	c.life = ctx
 	c.mu.Unlock()
 	d := newDuplex(c.cfg.call, c.events, c.heard)
+	if c.cfg.greeting != "" && c.cfg.greetHello > 0 {
+		c.speakAhead(ctx) // while it rings
+	}
 	go c.follow(ctx)
 	go c.work(ctx)
 	return d.run(ctx, call, c.sayPipe, c.control)
@@ -664,7 +673,16 @@ func (c *conversation) follow(ctx context.Context) {
 		case e := <-c.tap.ch:
 			switch e.Event {
 			case "ready":
-				if c.cfg.greeting != "" {
+				switch {
+				case c.cfg.greeting == "":
+				case c.cfg.greetHello > 0:
+					// Whoever picks up says something first. The greeting answers that; the
+					// timer is for the one who picks up and waits.
+					c.mu.Lock()
+					c.greetOwed, c.greetHeld = true, true
+					c.mu.Unlock()
+					time.AfterFunc(c.cfg.greetHello, func() { queue(segment{greeting: true}) })
+				default:
 					queue(segment{greeting: true})
 				}
 			case "speech_start":
@@ -741,6 +759,18 @@ func (c *conversation) beginTurn(ctx context.Context, force bool) (turn context.
 }
 
 func (c *conversation) greet(ctx context.Context) {
+	if c.cfg.greetHello > 0 {
+		// The wait for the peer's first word is over. If it is talking right now, answer
+		// takes it from there: the greeting is no longer held back.
+		c.mu.Lock()
+		c.greetHeld = false
+		talking := c.peerTalks
+		c.mu.Unlock()
+		if !talking {
+			c.sayGreeting(ctx, "", time.Time{})
+		}
+		return
+	}
 	// Whoever accepts a call on a phone still has to lift it: a greeting that starts with
 	// the connection is half over by then.
 	c.mu.Lock()
@@ -751,34 +781,111 @@ func (c *conversation) greet(ctx context.Context) {
 	case <-ctx.Done():
 		return
 	}
-	c.sayGreeting(ctx)
+	c.sayGreeting(ctx, "", time.Time{})
+}
+
+// spokenAhead is the greeting as audio, made while the phone still rings: once the peer
+// has said its first word, the greeting has no speech command to wait for.
+type spokenAhead struct {
+	done  chan struct{}
+	voice int
+	pcm   []byte
+	err   error
+}
+
+func (c *conversation) speakAhead(ctx context.Context) {
+	a := &spokenAhead{done: make(chan struct{})}
+	c.mu.Lock()
+	a.voice = c.voice
+	c.greetReady = a
+	c.mu.Unlock()
+	speak := c.speech()
+	go func() {
+		defer close(a.done)
+		var buf bytes.Buffer
+		begin := time.Now()
+		a.err = speak(ctx, c.cfg.greeting, &buf)
+		a.pcm = buf.Bytes()
+		if ctx.Err() != nil {
+			return
+		}
+		fields := map[string]any{"ms": time.Since(begin).Milliseconds(), "audio_ms": int64(len(a.pcm)/2) * 1000 / int64(c.cfg.call.inRate)}
+		if a.err != nil {
+			fields["error"] = a.err.Error()
+		}
+		c.events.emit("greeting_ready", fields)
+	}()
+}
+
+// ahead returns the greeting made in advance, if there is one for the voice that holds
+// the call. It waits for one that is still being made rather than start a second.
+func (c *conversation) ahead(ctx context.Context) []byte {
+	c.mu.Lock()
+	a, voice := c.greetReady, c.voice
+	c.mu.Unlock()
+	if a == nil || a.voice != voice {
+		return nil
+	}
+	select {
+	case <-a.done:
+	case <-ctx.Done():
+		return nil
+	}
+	if a.err != nil || len(a.pcm) == 0 {
+		return nil
+	}
+	return a.pcm
+}
+
+// opensTheCall tells whether what the peer said is no more than picking up: "Hallo?",
+// "Ja, bitte?", a name. That is answered with the greeting. Anything longer is the
+// peer opening the conversation, and gets an answer.
+func opensTheCall(text string) bool {
+	return len(strings.Fields(text)) <= 4
 }
 
 // sayGreeting speaks the greeting if it is still owed. A sound from the other end cuts
 // it short like any answer; if that sound turns out to be no speech (the click of
 // picking up), answer says the greeting again, and if it was speech, the peer has
 // opened the conversation and gets an answer instead.
-func (c *conversation) sayGreeting(ctx context.Context) {
+//
+// heard is what the peer said to pick up, if the greeting answers that (see
+// -greeting-after-hello), and since when the peer has been waiting. The result tells
+// whether the greeting was said to the end.
+func (c *conversation) sayGreeting(ctx context.Context, heard string, since time.Time) bool {
 	c.mu.Lock()
 	owed := c.greetOwed
+	c.greetHeld = false
 	c.mu.Unlock()
 	if !owed {
-		return
+		return false
 	}
 	turn, end, _ := c.beginTurn(ctx, true)
 	defer end()
-	err := c.speech()(turn, c.cfg.greeting, ctxWriter{ctx: turn, p: c.say})
+	var first time.Time
+	out := ctxWriter{ctx: turn, p: c.say, first: &first}
+	var err error
+	if pcm := c.ahead(turn); pcm != nil {
+		_, err = out.Write(pcm)
+	} else {
+		err = c.speech()(turn, c.cfg.greeting, out)
+	}
 	if err != nil {
 		if turn.Err() == nil {
 			c.events.emit("reply_error", map[string]any{"error": err.Error()})
 		}
-		return
+		return false
 	}
 	c.mu.Lock()
 	c.greetOwed = false
 	c.mu.Unlock()
-	c.remember("", nil, c.cfg.greeting)
-	c.events.emit("reply", c.voiced(map[string]any{"text": c.cfg.greeting, "greeting": true}))
+	c.remember(heard, nil, c.cfg.greeting)
+	fields := c.voiced(map[string]any{"text": c.cfg.greeting, "greeting": true})
+	if !since.IsZero() && !first.IsZero() {
+		fields["first_audio_ms"] = first.Sub(since).Milliseconds()
+	}
+	c.events.emit("reply", fields)
+	return true
 }
 
 // startJob runs a background tool for as long as the call lasts, not just the turn that
@@ -964,16 +1071,19 @@ func (c *conversation) answer(ctx context.Context, s segment) {
 		owed := len(c.pending) > 0
 		c.mu.Unlock()
 		if !owed {
-			c.sayGreeting(ctx) // if that noise cut off the greeting
+			c.mu.Lock()
+			held := c.greetHeld
+			c.mu.Unlock()
+			if !held { // a greeting that still waits for the first word is not for a click
+				c.sayGreeting(ctx, "", time.Time{}) // if that noise cut off the greeting
+			}
 			return
 		}
 		text = "" // a noise cut off the answer to what was said before: it is still owed
 	} else {
 		c.events.emit("heard", map[string]any{"text": text, "at": s.at.Seconds(), "stt_ms": time.Since(sttStart).Milliseconds()})
-		c.mu.Lock()
-		c.greetOwed = false // the peer spoke first
-		c.mu.Unlock()
 	}
+	heard := text
 	whose := ""
 	if verdict != nil && text != "" {
 		select {
@@ -992,6 +1102,23 @@ func (c *conversation) answer(ctx context.Context, s segment) {
 		c.pending = append(c.pending, text)
 	}
 	user := strings.Join(c.pending, " ")
+	// The peer spoke before the greeting was through. With -greeting-after-hello a word
+	// to pick up is what the greeting waited for (and a noise that cut the greeting off
+	// leaves it owed); otherwise, and for anything longer, the peer has opened the
+	// conversation and gets an answer instead.
+	greet := c.greetOwed && c.cfg.greetHello > 0 && (heard == "" || opensTheCall(heard))
+	if heard != "" && !greet {
+		c.greetOwed, c.greetHeld = false, false
+	}
+	if greet {
+		c.mu.Unlock()
+		if c.sayGreeting(ctx, user, s.ended) {
+			c.mu.Lock()
+			c.pending = nil // it went into the history with the greeting
+			c.mu.Unlock()
+		}
+		return
+	}
 	msgs := c.view()
 	owed, owedN := c.owedNote()
 	if c.locked() {
