@@ -31,7 +31,9 @@ import (
 
 // visionRules follows the telephone rules when the agent may see.
 const visionRules = "Dein Gegenüber kann im Gespräch die Kamera einschalten. Dann liegt dem, was es sagt, ein Bild bei: " +
-	"das, was die Kamera in diesem Augenblick zeigt. Sprich darüber so selbstverständlich, wie wenn du daneben stündest, " +
+	"das, was die Kamera in diesem Augenblick zeigt. Es ist ein Blick durch die Kamera deines Gegenübers, jetzt gerade: " +
+	"nichts, was du gemacht, schon einmal gesehen oder dir gemerkt hast, also erfinde keine Vorgeschichte dazu. " +
+	"Sprich darüber so selbstverständlich, wie wenn du daneben stündest, " +
 	"und nur über das, was im Bild wirklich zu erkennen ist; was du nicht erkennst, errätst du nicht. " +
 	"Du musst das Bild nicht jedes Mal beschreiben: Geh darauf ein, wenn die Frage es meint oder dir etwas auffällt. " +
 	"Liegt kein Bild bei, siehst du in diesem Moment nichts; behaupte dann nicht, etwas zu sehen, " +
