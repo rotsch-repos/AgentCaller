@@ -52,6 +52,11 @@ type converseConfig struct {
 	guardPath   string
 	guard       *speakerGuard    // who is speaking decides what the agent knows; nil: everybody is trusted
 	clock       func() time.Time // tells the model date and time with every question; nil: it is not told
+	vision      bool             // accept the peer's camera and show the model what it shows
+	visionCmd   string           // decoder, run by sh: H.264 on stdin, JPEGs on stdout
+	visionSave  string           // directory for the pictures that went to the model
+	simVideo    string           // with simulate: H.264 file played as the peer's camera
+	simVideoFPS float64
 }
 
 // phoneRules is appended to every persona: the answer is heard, not read.
@@ -134,6 +139,11 @@ func parseConverseArgs(args []string, stderr io.Writer) (converseConfig, error) 
 	flags.BoolVar(&cfg.noBargeIn, "no-barge-in", false, "let the agent finish its answer even when the peer starts to talk")
 	flags.StringVar(&cfg.simulate, "simulate", "", "no call: play this WAV as the peer (it waits for the agent at each pause) and run the real chain")
 	flags.StringVar(&cfg.record, "record", "", "with -simulate: write what the agent said to this WAV")
+	flags.BoolVar(&cfg.vision, "vision", false, "let the agent see: accept the peer's camera when it is switched on during the call (no picture is sent back) and give the model, with what the peer says, what the camera showed at that moment; the chat model must take pictures")
+	flags.StringVar(&cfg.visionCmd, "vision-cmd", defaultVisionCmd, "with -vision: the picture decoder, run by sh: H.264 (Annex B) on stdin, one JPEG per picture on stdout, each as soon as it is decoded")
+	flags.StringVar(&cfg.visionSave, "vision-save", "", "with -vision: keep the pictures that went to the model in this directory (for finding faults)")
+	flags.StringVar(&cfg.simVideo, "simulate-video", "", "with -simulate and -vision: play this H.264 file (Annex B) as the peer's camera")
+	flags.Float64Var(&cfg.simVideoFPS, "simulate-video-fps", 15, "frame rate of -simulate-video")
 	flags.StringVar(&cfg.recordHeard, "record-heard", "", "write what the agent heard to this WAV when the call ends (a recording of the peer: for finding faults)")
 	flags.Usage = func() {
 		fmt.Fprintln(stderr, "usage: agentcaller converse [flags] <target>")
@@ -164,6 +174,12 @@ func parseConverseArgs(args []string, stderr io.Writer) (converseConfig, error) 
 		return cfg, errors.New("-announce is for calls that are placed, not with -answer or -simulate")
 	case cfg.record != "" && cfg.simulate == "":
 		return cfg, errors.New("-record needs -simulate")
+	case !cfg.vision && (cfg.visionSave != "" || cfg.simVideo != "" || cfg.visionCmd != defaultVisionCmd):
+		return cfg, errors.New("-vision-cmd, -vision-save and -simulate-video need -vision")
+	case cfg.vision && strings.TrimSpace(cfg.visionCmd) == "":
+		return cfg, errors.New("-vision-cmd must not be empty")
+	case cfg.simVideo != "" && (cfg.simulate == "" || cfg.simVideoFPS <= 0):
+		return cfg, errors.New("-simulate-video needs -simulate and a positive -simulate-video-fps")
 	}
 	if cfg.simulate == "" {
 		cfg.call.target = flags.Arg(0)
@@ -232,6 +248,19 @@ func parseConverseArgs(args []string, stderr io.Writer) (converseConfig, error) 
 	}
 	if cfg.guard != nil {
 		cfg.guard.prompt = phonePrompt(cfg.guard.prompt, len(guestTools(cfg.tools)) > 0) + " " + guestRules
+	}
+	if cfg.vision {
+		// Guests too: the picture is of the moment and tells nothing about anybody else.
+		cfg.llm.Prompt += " " + visionRules
+		for i := range cfg.voices {
+			cfg.voices[i].prompt += " " + visionRules
+			if cfg.guard != nil {
+				cfg.voices[i].guestPrompt += " " + visionRules
+			}
+		}
+		if cfg.guard != nil {
+			cfg.guard.prompt += " " + visionRules
+		}
 	}
 	return cfg, nil
 }
@@ -304,10 +333,29 @@ func runConverse(ctx context.Context, cfg converseConfig, stderr io.Writer) erro
 		}()
 		c.heard.tape = c.tape
 	}
+	if cfg.vision {
+		if cfg.visionSave != "" {
+			if err := os.MkdirAll(cfg.visionSave, 0o700); err != nil {
+				return fmt.Errorf("-vision-save: %w", err)
+			}
+		}
+		c.eye = newEye(ctx, cfg.visionCmd, c.events)
+		defer c.eye.shut()
+	}
 	if cfg.simulate != "" {
 		peer := readWAV16(cfg.simulate)
 		if len(peer) == 0 {
 			return fmt.Errorf("-simulate: no audio in %s", cfg.simulate)
+		}
+		if cfg.simVideo != "" {
+			camera, err := os.Open(cfg.simVideo)
+			if err != nil {
+				return fmt.Errorf("-simulate-video: %w", err)
+			}
+			defer camera.Close()
+			on := make(chan struct{})
+			close(on)
+			go pumpVideo(ctx, func(au []byte, _ int) error { return c.eye.WriteVideo(au) }, camera, cfg.simVideoFPS, on, c.events)
 		}
 		sim := newSimCall(peer, cfg.greeting != "")
 		err := c.run(ctx, sim)
@@ -318,7 +366,12 @@ func runConverse(ctx context.Context, cfg converseConfig, stderr io.Writer) erro
 		}
 		return err
 	}
-	return placeCall(ctx, cfg.call, c.events, stderr, func(call *agentcaller.Call) error { return c.run(ctx, call) })
+	return placeCall(ctx, cfg.call, c.events, stderr, func(call *agentcaller.Call) error {
+		if c.eye != nil {
+			c.watch(call)
+		}
+		return c.run(ctx, call)
+	})
 }
 
 // voiceChain is what a conversation needs from the outside world.
@@ -555,6 +608,8 @@ type conversation struct {
 	unlocked   bool         // the password was said: trusted for the rest of the call
 	speaker    string       // name of the voice heard last, if it is a known one
 	held       []*jobReport // outcomes that wait for a trusted speaker
+	eye        *eye         // the peer's camera; nil: the agent does not see
+	seen       int          // pictures that went to the model
 }
 
 func newConversation(cfg converseConfig, chain voiceChain, eventsOut io.Writer) *conversation {
@@ -955,7 +1010,15 @@ func (c *conversation) answer(ctx context.Context, s segment) {
 	if owed != "" {
 		asked += "\n\n" + owed
 	}
-	msgs = append(msgs, chatMessage{Role: "user", Content: asked})
+	question, kept := chatMessage{Role: "user", Content: asked}, user
+	var saw map[string]any
+	if text != "" {
+		if seen, fields := c.look(&question, s); seen {
+			// The history keeps the words, not the picture; the note says there was one.
+			saw, kept = fields, user+"\n\n"+sawNote
+		}
+	}
+	msgs = append(msgs, question)
 
 	turn, end, ok := c.beginTurn(ctx, false)
 	if !ok {
@@ -980,10 +1043,13 @@ func (c *conversation) answer(ctx context.Context, s segment) {
 	c.mu.Lock()
 	c.pending = nil
 	c.mu.Unlock()
-	c.remember(user, looked, reply)
+	c.remember(kept, looked, reply)
 	fields := c.voiced(map[string]any{"text": reply, "interrupted": interrupted})
 	if len(looked) > 0 {
 		fields["looked_up"] = true
+	}
+	for k, v := range saw {
+		fields[k] = v // what the camera showed went along with the question
 	}
 	if owedN > 0 && !interrupted {
 		c.said(owedN)
