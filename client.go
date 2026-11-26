@@ -32,6 +32,13 @@ type Client struct {
 	onIncomingCall func(*Call)
 }
 
+// CallOptions controls media negotiated for an outbound call.
+type CallOptions struct {
+	// Video advertises a WhatsApp video call. The caller must provide encoded H.264
+	// access units with Call.SendVideo after media is active.
+	Video bool
+}
+
 // NewClient wraps a connected whatsmeow client and installs the call event handlers.
 // Construct it before the whatsmeow client connects so the low-level <ack>/<call>
 // interception is in place before the receive loop starts.
@@ -48,7 +55,12 @@ func NewClient(wa *whatsmeow.Client, opts ...Option) *Client {
 // to the returned Call; media starts automatically once the peer answers and the relay
 // endpoint arrives.
 func (c *Client) Call(ctx context.Context, target string) (*Call, error) {
-	return c.eng.placeCall(ctx, target)
+	return c.CallWithOptions(ctx, target, CallOptions{})
+}
+
+// CallWithOptions places a 1:1 call with explicit media options.
+func (c *Client) CallWithOptions(ctx context.Context, target string, opts CallOptions) (*Call, error) {
+	return c.eng.placeCall(ctx, target, opts)
 }
 
 // SendText sends target a plain text message from the linked account, for instance to

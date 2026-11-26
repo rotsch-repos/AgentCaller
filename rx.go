@@ -19,6 +19,12 @@ type ReceiveStats struct {
 	// ConcealedSamples is the amount of audio filled in for lost packets (silence, or a
 	// synthesised continuation with Call.ConcealLosses).
 	ConcealedSamples uint64
+	// ActiveFrames is the number of speech frames decoded; LowRate is how many of them
+	// came in the codec's low-rate mode (the peer saving bandwidth), and Unsupported how
+	// many had a format the decoder does not implement and were replaced by silence.
+	ActiveFrames uint64
+	LowRate      uint64
+	Unsupported  uint64
 }
 
 // audioReceiver turns unprotected inbound audio packets into an ordered PCM stream with
@@ -138,7 +144,12 @@ func (r *audioReceiver) write(frame []float32) {
 func (r *audioReceiver) stats() ReceiveStats {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return ReceiveStats{Stats: r.ro.Stats(), ConcealedSamples: r.concealed}
+	st := ReceiveStats{Stats: r.ro.Stats(), ConcealedSamples: r.concealed}
+	if r.dec != nil {
+		d := r.dec.Stats()
+		st.ActiveFrames, st.LowRate, st.Unsupported = d.Active, d.LowRate, d.Unsupported
+	}
+	return st
 }
 
 // close stops the timer; later pushes are ignored.
