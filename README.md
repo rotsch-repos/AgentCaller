@@ -27,7 +27,9 @@ around the codec so that a call feels immediate. See [Credits](#credits).
 | Two-way pipe (`call`), speech events, barge-in | tested offline against a simulated call; **no live call yet** |
 | Spoken conversation (`converse`): recognition, chat model, speech command | tested offline, and end to end with `-simulate` against real services. After a failed first call, **two live calls on 2026-11-25 held a conversation** over several minutes (see the changelog). A later call that day ran 17 minutes with lookups, background errands and the 480 ms interruption rule. Several voices (`-voices`), the speaker check (`-speakers`) and the warm start came after it and are **not yet confirmed on a call** |
 | New receive path (ordering, loss handling) | tested offline with simulated loss and reordering; **not yet on real traffic** |
-| Video send and receive | tested offline against ffmpeg; **never validated in a live call**, as upstream |
+| Video send and receive | tested offline against ffmpeg; **never validated in a live call by this fork** |
+| Upstream's later work on one-to-one calls (sender reports, keyframe requests, rekeying to the answering device, relay choice, low-rate frames, video switched on during a call) | taken over on 2026-11-26, upstream's and our tests pass; it changes what an ordinary audio call sends, and **no live call has been placed with it yet** |
+| Seeing (`converse -vision`) | tested offline and rehearsed with `-simulate-video` against a real decoder and a real model; **no live call yet** |
 
 Everything in the "offline" rows is exercised by `go test ./...`. Nothing here
 claims more than that.
@@ -172,6 +174,35 @@ so the model cannot give it away; the file must be readable by its owner alone.
 A voice profile tells who is probably speaking. It is not a lock: a recording or a
 cloned voice passes it. Events: `speaker` (`trusted`, `guest`, `score`, `speaker`).
 
+The agent can see. With `-vision` the call accepts the peer's camera when the person
+switches it on (nothing is sent back: the person sees no picture of the agent), and
+what the camera showed when the person stopped talking goes to the chat model together
+with the words. The model must take pictures in the OpenAI format (`image_url` with a
+data URI).
+
+```sh
+agentcaller converse -vision -vision-save seen/ ... +41790000000
+```
+
+The H.264 that arrives is decoded by one long-running command (`-vision-cmd`, ffmpeg
+by default: H.264 on stdin, a JPEG per picture on stdout, at most 768 pixels on the
+long side). A picture every fifth of a second is kept for eight seconds; the one from
+the end of the words is turned upright by what the call says about how the phone is
+held, and sent. Earlier turns keep a note that there was a picture, not the picture.
+With the camera off, or when the last picture is older than four seconds, the model
+gets none and is told to say so rather than to guess. `-vision-save DIR` keeps what the
+model was shown. Events: `video_state`, `video_accepted`, `seeing` (`on`, `width`,
+`height`, `turns`), `vision_error`; `reply` carries `picture_bytes` and `picture_ms`
+(how far the picture is from the end of the words).
+
+Rehearsed with `-simulate peer.wav -simulate-video camera.h264`, a synthetic camera
+that shows one sign for 20 seconds and then another: a 27B model on a local GPU read
+both signs correctly, each at the right moment, from pictures 14 and 40 ms older than
+the end of the question. The answers started 1.25 s after the pause was reported,
+against 0.95 s for a turn without a picture. One run, three turns. What a rehearsal
+cannot show: that a phone's camera arrives at all, in what orientation, and how the
+pictures look after loss. The decoder is not sandboxed; it reads what the peer sends.
+
 Before the first word, the prompts and tool lists of the call are sent to the chat
 endpoint once with a one-token answer, so that a server with a prefix cache has read
 the persona by the time the person speaks (event `warmed` with `ms`).
@@ -252,9 +283,18 @@ agentcaller call -video-in video.fifo -video-out peer.h264 +41790000000
   replaces made a 30 fps stream play at half speed.
 - Checked: split, packetise, depacketise, and ffmpeg decodes the result to the
   same pictures as the original.
-- Not checked: whether a phone shows the picture. The live video path has never
-  been validated, here or upstream, and an audio call that the person upgrades
-  to video is still work in progress upstream. Treat the flags as experimental.
+- Video can start during a call: `Call.StartVideo` asks the peer to take our
+  picture, `Call.AcceptVideo` takes the peer's when it switches its camera on
+  (`Call.OnVideoState` reports it) without sending one back, `Call.StopVideo` ends
+  ours. `agentcaller call -video-out` accepts the peer's camera that way.
+- Received video is put together picture by picture. After a lost packet nothing
+  is passed on until the next keyframe, and the peer is asked for one (RTCP picture
+  loss indication, repeated every second while none has come), so a decoder never
+  gets a picture that builds on one it has not seen.
+- Not checked: whether a phone shows the picture, and whether a phone's camera
+  arrives. This fork has not validated the live video path. While only the peer
+  sends video, no reception reports for it go back; what a phone makes of that is
+  unknown. Treat the flags as experimental.
 
 ## Library
 
@@ -294,6 +334,9 @@ protocol logging.
 - [meowcaller](https://github.com/purpshell/meowcaller) by Rajeh Taher
   (purpshell): the WhatsApp VoIP stack and the pure-Go MLow codec this is built
   on. If AgentCaller is useful to you, [sponsor the original](https://purpshell.dev/sponsor).
+  The fork was brought up to upstream's one-to-one call work of November 2026
+  (up to commit `1ac2787`, plus the reassembly of received video with its keyframe
+  request from `6d9b7b2`); group calls and what they are built on were left out.
 - [steipete/meowcaller](https://github.com/steipete/meowcaller): the headless
   `pair` and `notify` commands this fork started from.
 - [WaCalls](https://github.com/JotaDev66/WaCalls) by jotadev66: the design of
