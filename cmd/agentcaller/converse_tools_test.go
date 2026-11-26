@@ -350,7 +350,7 @@ func TestPromise(t *testing.T) {
 		"Das trage ich gleich ein.":                                   true,
 		"Mir geht es gut, danke, dass du fragst.":                     false,
 		"Das Matterhorn ist 4478 Meter hoch.":                         false,
-		"Tschüss, Roger. Gute Nacht.":                                 false,
+		"Tschüss, Jonas. Gute Nacht.":                                 false,
 		"Ich mag es, wenn sich ein Gespräch ergibt.":                  false,
 		"Morgen wird es kalt, nach dem Mittag kommt Regen.":           false,
 	} {
