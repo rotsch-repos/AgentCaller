@@ -77,16 +77,27 @@ speak. Whatever drives the conversation reads and writes the pipes.
 | `-conceal` | synthesise lost packets instead of silence; for human listeners |
 | `-hangup-on-eof` | hang up when `-in` has ended and everything was sent |
 | `-answer-timeout D`, `-max-duration D` | limits; `0` disables |
+| `-answer-check CMD` | with `-answer`: a command (`sh -c`) that decides, while the call rings, whether it is answered; see below |
 | `-video-in PATH`, `-video-fps N`, `-video-out PATH` | experimental H.264 Annex-B pass-through |
 | `-store PATH` | linked-device store |
 
-Events: `connected`, `calling` or `waiting`/`incoming`/`ignored_call`, `state`, `ready`,
+Events: `connected`, `calling` or `waiting`/`incoming`/`ignored_call` (with `-answer-check`
+also `ringing`, `declined`, `missed`, `answer_check_failed {error}`), `state`, `ready`,
 `speech_start {at}`, `speech_end {at, duration}`, `flushed {cause, ms}`, `input_eof`,
 `played`, `stats {...}`, `ended {reason}`. `at` is seconds of received audio, so it
 indexes straight into the `-out` stream (`at * 16000 * 2` bytes).
 
 With `-answer`, only the named caller is answered. Other calls are neither answered nor
 rejected: a reject from a linked device declines the call on the phone too.
+
+`-answer-check CMD` lets the agent be busy. While a call from the named caller rings, CMD
+runs (`AGENTCALLER_CALL_ID` in its environment) and its exit status is the verdict: 75
+declines the call, as a person would who cannot talk right now, and the program goes on
+waiting for the next one; anything else answers. That includes a command that fails or
+has no verdict within 15 seconds (`answer_check_failed` says why): a broken check must
+not cost the caller the call. What happens after a declined call, a message or a call
+back, is up to the command. `incoming` is still written when the call is answered, and
+`ringing` when the command starts; `missed` means the caller gave up before the verdict.
 
 Audio that arrives on `-in` before the call is answered is not read, so nothing stale is
 spoken. If the reader of `-out` falls more than three seconds behind, frames are dropped
@@ -149,7 +160,7 @@ Events: `video_state {active, upgrade, orientation, state}`, `video_accepted`, `
 started again with the next picture data; one that shows nothing three times in a row is left
 alone and the call goes on without pictures. Not yet seen on a live call.
 
-Flags: `-store`, `-answer`, `-answer-timeout`, `-max-duration`, `-end-silence`, `-events`,
+Flags: `-store`, `-answer`, `-answer-check`, `-answer-timeout`, `-max-duration`, `-end-silence`, `-events`,
 `-persona FILE`, `-greeting TEXT`, `-llm-url`, `-llm-model`, `-max-tokens`, `-stt-url`,
 `-stt-model`, `-stt-language`, `-tts-cmd`, `-tts-rate`, `-no-barge-in`, `-simulate`, `-record`,
 `-vision`, `-vision-cmd`, `-vision-save`, `-simulate-video`, `-simulate-video-fps`.

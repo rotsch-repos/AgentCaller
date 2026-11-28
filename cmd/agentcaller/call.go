@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,6 +31,7 @@ import (
 type callConfig struct {
 	target        string // number to call, or with -answer the caller to accept ("any" = everyone)
 	answer        bool
+	answerCheck   string // with -answer: a command that decides, while the call rings, whether it is answered
 	storePath     string
 	inPath        string
 	outPath       string
@@ -81,6 +84,7 @@ func parseCallArgs(args []string, stderr io.Writer) (callConfig, error) {
 	flags := flag.NewFlagSet("call", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	flags.BoolVar(&cfg.answer, "answer", false, "wait for an incoming call from <caller> and answer it, instead of calling")
+	flags.StringVar(&cfg.answerCheck, "answer-check", "", answerCheckUsage)
 	flags.StringVar(&cfg.storePath, "store", defaultStore, "linked-device SQLite store")
 	flags.StringVar(&cfg.inPath, "in", "-", "audio to send: raw s16le mono PCM from this file or FIFO; - is stdin, none sends silence")
 	flags.StringVar(&cfg.outPath, "out", "-", "received audio: raw s16le mono 16 kHz PCM to this file or FIFO; - is stdout, none discards")
@@ -115,6 +119,8 @@ func parseCallArgs(args []string, stderr io.Writer) (callConfig, error) {
 	switch {
 	case cfg.answer && cfg.announce != "":
 		return cfg, errors.New("-announce is for calls that are placed, not with -answer")
+	case !cfg.answer && cfg.answerCheck != "":
+		return cfg, errors.New("-answer-check decides about calls that come in; it needs -answer")
 	case cfg.answerTimeout < 0 || cfg.maxDuration < 0 || cfg.maxBuffer < 0 || cfg.endSilence <= 0:
 		return cfg, errors.New("durations must be non-negative (-end-silence positive)")
 	case cfg.inRate < 4000 || cfg.inRate > 192000:
@@ -859,8 +865,44 @@ func (d *duplex) runWithVideo(ctx context.Context, call *agentcaller.Call, in io
 	return d.run(ctx, call, in, control)
 }
 
+const (
+	answerCheckUsage = "with -answer: run this command (sh -c) while a call from <caller> rings; exit status 75 declines the call and the wait goes on, anything else answers it"
+	// answerCheckDecline is EX_TEMPFAIL from sysexits.h: busy now, try again later.
+	answerCheckDecline = 75
+	// answerCheckLimit is well below the time a call rings before the caller's phone gives up.
+	answerCheckLimit = 15 * time.Second
+)
+
+// answerVerdict runs the -answer-check command and reports whether the ringing call is
+// to be answered. Only exit status 75 declines. A command that fails in any other way,
+// or has no verdict within limit, answers and reports why: a broken check must not cost
+// the caller the call.
+func answerVerdict(ctx context.Context, command, callID string, limit time.Duration) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, limit)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd.Env = append(os.Environ(), "AGENTCALLER_CALL_ID="+callID)
+	cmd.WaitDelay = 2 * time.Second
+	var complaints bytes.Buffer
+	cmd.Stderr = &complaints
+	err := cmd.Run()
+	var exit *exec.ExitError
+	switch {
+	case err == nil:
+		return true, nil
+	case ctx.Err() == context.DeadlineExceeded:
+		return true, fmt.Errorf("no verdict within %s", limit)
+	case errors.As(err, &exit) && exit.ExitCode() == answerCheckDecline:
+		return false, nil
+	default:
+		return true, fmt.Errorf("%w: %s", err, lastLine(complaints.String()))
+	}
+}
+
 // awaitCaller waits for an incoming call from the expected peer and answers it. Calls
-// from anyone else are left alone: rejecting them would also silence the phone.
+// from anyone else are left alone: rejecting them would also silence the phone. With
+// -answer-check the expected peer's call is declined when the command says so, and the
+// wait goes on.
 func awaitCaller(ctx context.Context, client *agentcaller.Client, cfg callConfig, incoming <-chan *agentcaller.Call, events *eventLog) (*agentcaller.Call, error) {
 	want := ""
 	if cfg.target != "any" {
@@ -881,6 +923,29 @@ func awaitCaller(ctx context.Context, client *agentcaller.Client, cfg callConfig
 			if want != "" && c.Peer().User != want {
 				events.emit("ignored_call", map[string]any{"call_id": c.ID()})
 				continue
+			}
+			if cfg.answerCheck != "" {
+				events.emit("ringing", map[string]any{"call_id": c.ID(), "video": c.IsVideo()})
+				answer, err := answerVerdict(ctx, cfg.answerCheck, c.ID(), answerCheckLimit)
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
+				if c.State() == agentcaller.CallPhaseEnded {
+					// The caller gave up while the command was deciding.
+					events.emit("missed", map[string]any{"call_id": c.ID()})
+					continue
+				}
+				if !answer {
+					note := map[string]any{"call_id": c.ID()}
+					if err := c.Reject(); err != nil {
+						note["error"] = err.Error()
+					}
+					events.emit("declined", note)
+					continue
+				}
+				if err != nil {
+					events.emit("answer_check_failed", map[string]any{"call_id": c.ID(), "error": err.Error()})
+				}
 			}
 			events.emit("incoming", map[string]any{"call_id": c.ID(), "video": c.IsVideo()})
 			if err := c.Answer(); err != nil {

@@ -7,6 +7,16 @@ All notable changes to AgentCaller (meowcaller before the fork), tracked per mod
 
 ## [Unreleased]
 
+### An agent that is busy declines the call (2026-11-28)
+- **`call -answer` and `converse -answer`: `-answer-check CMD`.** While a call from the
+  expected caller rings, CMD decides: exit status 75 declines the call and the program
+  goes on waiting, anything else answers. A command that fails or has no verdict within
+  15 seconds answers too. New events `ringing`, `declined`, `missed`,
+  `answer_check_failed`; `incoming` still means the call is being answered. Why: an agent
+  whose model server is busy with other work answers slowly or not at all, and a call
+  that is declined with a "I'll call you back" is the better call. Tests cover the
+  verdict and the flags; **no call has been declined live with this build yet**.
+
 ### Upstream's one-to-one call work, and an agent that sees (2026-11-26)
 - **Taken over from purpshell/meowcaller: the 49 commits after the fork point up to
   `1ac2787`** (48 by Rajeh Taher, one by mestredk) — upstream's tests and ours pass;
