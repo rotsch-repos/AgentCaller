@@ -35,6 +35,7 @@ func TestParseCallArgs(t *testing.T) {
 		{"-end-silence", "0s", "x"},            // would end speech on every frame
 		{"-max-duration", "-1s", "x"},          // negative
 		{"-hangup-on-eof", "-in", "none", "x"}, // nothing can ever reach EOF
+		{"-answer-check", "true", "x"},         // decides about calls that come in, and none does
 	} {
 		if _, err := parseCallArgs(bad, io.Discard); err == nil {
 			t.Fatalf("arguments %v accepted", bad)
@@ -42,6 +43,34 @@ func TestParseCallArgs(t *testing.T) {
 	}
 	if _, err := parseCallArgs(nil, io.Discard); !errors.Is(err, errUsage) {
 		t.Fatalf("missing target: %v, want a usage error", err)
+	}
+}
+
+func TestAnswerVerdict(t *testing.T) {
+	ctx := context.Background()
+	for _, c := range []struct {
+		command string
+		answer  bool
+		failed  bool
+	}{
+		{"true", true, false},
+		{"exit 75", false, false},
+		{`test "$AGENTCALLER_CALL_ID" = abc || exit 75`, true, false}, // the command learns which call it decides about
+		{"echo broken >&2; exit 1", true, true},                       // a broken check answers
+		{"no-such-command-anywhere", true, true},
+		{"sleep 5", true, true}, // no verdict in time answers too
+	} {
+		answer, err := answerVerdict(ctx, c.command, "abc", 300*time.Millisecond)
+		if answer != c.answer || (err != nil) != c.failed {
+			t.Errorf("%q: answer %v, error %v; want answer %v, failure %v", c.command, answer, err, c.answer, c.failed)
+		}
+	}
+	if _, err := answerVerdict(ctx, "echo broken >&2; exit 1", "abc", time.Second); err == nil || !strings.Contains(err.Error(), "broken") {
+		t.Errorf("the reason of a failed check is lost: %v", err)
+	}
+	cfg, err := parseCallArgs([]string{"-answer", "-answer-check", "exit 75", "+41790000000"}, io.Discard)
+	if err != nil || cfg.answerCheck != "exit 75" {
+		t.Fatalf("-answer-check with -answer: %+v, %v", cfg, err)
 	}
 }
 
